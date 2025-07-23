@@ -13,7 +13,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 # ===== CONFIGURATION =====
 # Set the OpenAI API key as an environment variable
-os.environ["OPENAI_API_KEY"] = "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"
+os.environ["OPENAI_API_KEY"] = "insert_api_key_here"
 
 # API Configuration
 openai_api_key = os.getenv("OPENAI_API_KEY")
