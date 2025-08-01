@@ -11,6 +11,8 @@ import os
 import sys
 from pathlib import Path
 import PyPDF2
+import string
+from datetime import datetime
 
 def clear_screen():
     """Clear terminal screen"""
@@ -85,99 +87,121 @@ def browse_files(start_dir):
 
 def extract_pdf_text(pdf_path):
     """Extract text from PDF using PyPDF2"""
-    text = ""
+    text_pages = []
     try:
         with open(pdf_path, 'rb') as file:
             reader = PyPDF2.PdfReader(file)
             for page_num in range(len(reader.pages)):
                 page = reader.pages[page_num]
-                text += page.extract_text() + "\n"
+                page_text = page.extract_text()
+                text_pages.append(page_text if page_text else "")
     except Exception as e:
         raise RuntimeError(f"Failed to extract text from PDF: {str(e)}")
     
-    return text
+    return text_pages
 
-def parse_sections(text):
-    """
-    Parse text into sections based on heading patterns.
-    Improved to match USDA Strategic Plan structure and manual spreadsheet.
-    """
-    # Patterns for Strategic Goals and Objectives
-    goal_pattern = re.compile(r'^(Strategic Goal \d+)(.*)$', re.IGNORECASE)
-    objective_pattern = re.compile(r'^(Objective \d+\.\d+)(.*)$', re.IGNORECASE)
+def get_pdf_title(pdf_path):
+    """Extract the Title field from PDF document properties."""
+    try:
+        with open(pdf_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            info = reader.metadata
+            title = info.title if info and info.title else Path(pdf_path).stem
+            return title.strip()
+    except Exception:
+        return Path(pdf_path).stem
 
-    sections = []
-    current_goal = None
-    current_section = None
+def get_bookmarks(reader):
+    """Flatten all bookmarks (including nested) into a list of (title, page_number) tuples."""
+    bookmarks = []
+    def walk(outlines):
+        for item in outlines:
+            if isinstance(item, list):
+                walk(item)
+            else:
+                try:
+                    title = item.title if hasattr(item, 'title') else str(item)
+                    page_num = reader.get_destination_page_number(item)
+                    bookmarks.append((title.strip(), page_num))
+                except Exception:
+                    continue
+    try:
+        walk(reader.outline)
+    except Exception:
+        try:
+            walk(reader.outlines)
+        except Exception:
+            pass
+    # Remove duplicates and sort by page number, but keep all bookmarks
+    seen = set()
+    unique_bookmarks = []
+    for title, page_num in bookmarks:
+        key = (title, page_num)
+        if key not in seen:
+            unique_bookmarks.append((title, page_num))
+            seen.add(key)
+    # Sort by page number, but preserve original order for bookmarks on the same page
+    unique_bookmarks.sort(key=lambda x: (x[1], bookmarks.index(x)))
+    return unique_bookmarks
 
-    lines = text.split('\n')
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
+def extract_sections_by_bookmarks(pdf_path):
+    """Extract sections based on PDF bookmarks."""
+    with open(pdf_path, 'rb') as file:
+        reader = PyPDF2.PdfReader(file)
+        text_pages = []
+        for page_num in range(len(reader.pages)):
+            page = reader.pages[page_num]
+            page_text = page.extract_text()
+            text_pages.append(page_text if page_text else "")
+        bookmarks = get_bookmarks(reader)
+        sections = []
+        for i, (title, start_page) in enumerate(bookmarks):
+            end_page = bookmarks[i+1][1] if i+1 < len(bookmarks) else len(text_pages)
+            section_text = "\n".join(text_pages[start_page:end_page]).strip()
+            sections.append({
+                "heading": title,
+                "content": section_text
+            })
+        return sections
 
-        goal_match = goal_pattern.match(line)
-        obj_match = objective_pattern.match(line)
-
-        if goal_match:
-            # Save previous section if exists
-            if current_section:
-                sections.append(current_section)
-                current_section = None
-            # Start new goal section
-            current_goal = goal_match.group(1).strip()
-            goal_title = goal_match.group(2).strip()
-            heading = current_goal
-            if goal_title:
-                heading += " " + goal_title
-            current_section = {
-                "heading": heading,
-                "content": []
-            }
-        elif obj_match:
-            # Save previous section if exists
-            if current_section:
-                sections.append(current_section)
-            # Start new objective section, include parent goal in heading
-            obj_heading = obj_match.group(1).strip()
-            obj_title = obj_match.group(2).strip()
-            heading = f"{current_goal} - {obj_heading}"
-            if obj_title:
-                heading += " " + obj_title
-            current_section = {
-                "heading": heading,
-                "content": []
-            }
-        else:
-            if current_section:
-                current_section["content"].append(line)
-
-    # Add last section
-    if current_section:
-        sections.append(current_section)
-
-    # Clean up content
-    for section in sections:
-        section["content"] = "\n".join(section["content"]).strip()
-
-    return sections
+def normalize_heading(heading):
+    """Trim, remove control characters, and title-case the heading."""
+    # Remove non-printable/control characters
+    heading = ''.join(ch for ch in heading if ch in string.printable)
+    heading = heading.strip()
+    # Optionally, title-case headings (comment out if not wanted)
+    heading = heading.title()
+    return heading
 
 def normalize_text(text):
-    """Clean and normalize text content with all required replacements"""
+    """Clean and normalize text content with all required replacements and enhancements"""
+    # Remove non-printable/control characters
+    text = ''.join(ch for ch in text if ch in string.printable or ch in '\n\r')
+    
+    # Remove common headers/footers/page numbers (basic patterns, adjust as needed)
+    # Example: Remove lines that are just numbers (page numbers)
+    text = re.sub(r'^\s*\d+\s*$', '', text, flags=re.MULTILINE)
+    # Example: Remove lines that match "Page X" or "Page X of Y"
+    text = re.sub(r'^\s*Page\s+\d+(\s+of\s+\d+)?\s*$', '', text, flags=re.MULTILINE)
+    
     replacements = [
         (r'—', '--'),          # Em-dash to two en-dashes
-        (r'‘', "'"),            # Left single smart quote
-        (r'’', "'"),            # Right single smart quote
-        (r'“', '"'),            # Left double smart quote
-        (r'”', '"'),            # Right double smart quote
-        (r'\t', ' '),           # Tabs to spaces
-        (r'\s+', ' '),          # Multiple spaces to single space
-        (r'•\s*', '- '),        # Bullets to dashes
-        (r'\s*-\s+', '-'),      # Fix hyphenated words
+        (r'‘', "'"),           # Left single smart quote
+        (r'’', "'"),           # Right single smart quote
+        (r'â€™', "'"),         # Fix encoding: right single quote
+        (r'“', '"'),           # Left double smart quote
+        (r'”', '"'),           # Right double smart quote
+        (r'\t', ' '),          # Tabs to spaces
+        (r'•\s*', '- '),       # Bullets to dashes
+        (r'\s*-\s+', '-'),     # Fix hyphenated words
     ]
-    
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text)
+    
+    # Consistent line break handling: replace multiple line breaks with a single one, then flatten to single space
+    text = re.sub(r'\n+', '\n', text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
     
     return text.strip()
 
@@ -206,6 +230,10 @@ def main():
     
     # Get output path
     output_csv = pdf_path.with_suffix('.csv')
+    # --- Add timestamp suffix to output filename ---
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
+    output_csv = output_csv.with_name(f"{output_csv.stem}_{timestamp}{output_csv.suffix}")
+    # ------------------------------------------------
     output_path, error = browse_files(output_csv.parent)
     if error:
         print(f"\nError: {error}")
@@ -217,21 +245,22 @@ def main():
         output_csv = output_path.with_suffix('.csv')
     else:
         output_csv = output_path
-    
+
+    # --- Ensure timestamp is appended if user changes filename ---
+    if not output_csv.stem.endswith(timestamp):
+        output_csv = output_csv.with_name(f"{output_csv.stem}_{timestamp}{output_csv.suffix}")
+    # ------------------------------------------------------------
+
     # Get URL
     url = input("\nEnter source URL (press Enter to skip): ").strip()
     
     try:
-        # Extract text from PDF
-        print(f"\nExtracting text from PDF...")
-        text = extract_pdf_text(pdf_path)
-        
-        # Parse sections
-        print("Parsing sections...")
-        sections = parse_sections(text)
+        # Extract sections by bookmarks from PDF
+        print(f"\nExtracting sections by bookmarks from PDF...")
+        sections = extract_sections_by_bookmarks(pdf_path)
         
         # Prepare CSV output
-        source_name = pdf_path.stem
+        source_name = get_pdf_title(pdf_path)
         print(f"Found {len(sections)} components")
         print(f"Saving to: {output_csv}")
         
