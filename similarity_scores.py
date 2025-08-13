@@ -198,7 +198,7 @@ if __name__ == "__main__":
         "Similarity Score"
     ])
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = os.path.join(script_dir, f'ivn_inferred_causal_output_{timestamp}.csv')
+    output_path = os.path.join(script_dir, f'ivn_inferred_causal_output_{timestamp}.tsv')
     print("Saving output file...")
-    output_df.to_csv(output_path, index=False, encoding='utf-8-sig')
+    output_df.to_csv(output_path, index=False, encoding='utf-8-sig', sep='\t')
     print(f"Output saved to: {output_path}")
