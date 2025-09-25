@@ -20,16 +20,15 @@ import os
 import sys
 import hashlib
 import pandas as pd
-import time
 
-TRIAD_COLUMNS = ['component_name', 'component_description', 'source']  # FIXED: use 'component_description'
+TRIAD_COLUMNS = ['component_name', 'description', 'source']
 HASH_COLUMN = 'TriadHash'
 BACKUP_SUFFIX = '_backup'
 COMPONENTS_SHEET = 'Components'
 
 def hash_triad(row):
     """Create a SHA256 hash for the triad."""
-    triad_str = f"{row['component_name']}||{row['component_description']}||{row['source']}"  # FIXED
+    triad_str = f"{row['component_name']}||{row['description']}||{row['source']}"
     return hashlib.sha256(triad_str.encode('utf-8')).hexdigest()
 
 def backup_file(filepath):
@@ -53,9 +52,6 @@ def validate_triad_hashes(filepath):
             sys.exit(1)
         df = pd.read_excel(xls, sheet_name=COMPONENTS_SHEET)
     errors = []
-    total = len(df)
-    print(f"🔎 Validating triad hashes in {total} rows...")
-    start_time = time.time()
     for idx, row in df.iterrows():
         try:
             expected_hash = hash_triad(row)
@@ -64,14 +60,6 @@ def validate_triad_hashes(filepath):
                 errors.append((idx, {col: row.get(col, '') for col in TRIAD_COLUMNS}, actual_hash, expected_hash))
         except Exception as e:
             errors.append((idx, {col: row.get(col, '') for col in TRIAD_COLUMNS}, 'ERROR', f'Exception: {e}'))
-        if (idx + 1) % 10 == 0 or idx == total - 1:
-            elapsed = time.time() - start_time
-            done = idx + 1
-            left = total - done
-            avg_time = elapsed / done if done else 0
-            est_left = avg_time * left
-            mins, secs = divmod(int(est_left), 60)
-            print(f"  Progress: {done}/{total} rows | {left} left | Est. {mins}m {secs}s remaining")
     return errors
 
 def add_triad_hashes(filepath):
@@ -86,22 +74,9 @@ def add_triad_hashes(filepath):
         if col not in df.columns:
             print(f"❌ Column '{col}' not found in '{COMPONENTS_SHEET}' sheet.")
             sys.exit(1)
-    total = len(df)
-    print(f"🔄 Adding triad hashes to {total} rows...")
-    start_time = time.time()
-    hashes = []
-    for idx, row in df.iterrows():
-        hashes.append(hash_triad(row))
-        if (idx + 1) % 10 == 0 or idx == total - 1:
-            elapsed = time.time() - start_time
-            done = idx + 1
-            left = total - done
-            avg_time = elapsed / done if done else 0
-            est_left = avg_time * left
-            mins, secs = divmod(int(est_left), 60)
-            print(f"  Progress: {done}/{total} rows | {left} left | Est. {mins}m {secs}s remaining")
-    df[HASH_COLUMN] = hashes
+    df[HASH_COLUMN] = df.apply(hash_triad, axis=1)
     sheets[COMPONENTS_SHEET] = df
+    # FIX: Use mode='w' instead of mode='overwrite'
     with pd.ExcelWriter(filepath, engine='openpyxl', mode='w') as writer:
         for sheet, data in sheets.items():
             data.to_excel(writer, sheet_name=sheet, index=False)
@@ -119,22 +94,9 @@ def repair_triad_hashes(filepath):
         if col not in df.columns:
             print(f"❌ Column '{col}' not found in '{COMPONENTS_SHEET}' sheet.")
             sys.exit(1)
-    total = len(df)
-    print(f"🛠️ Repairing triad hashes in {total} rows...")
-    start_time = time.time()
-    hashes = []
-    for idx, row in df.iterrows():
-        hashes.append(hash_triad(row))
-        if (idx + 1) % 10 == 0 or idx == total - 1:
-            elapsed = time.time() - start_time
-            done = idx + 1
-            left = total - done
-            avg_time = elapsed / done if done else 0
-            est_left = avg_time * left
-            mins, secs = divmod(int(est_left), 60)
-            print(f"  Progress: {done}/{total} rows | {left} left | Est. {mins}m {secs}s remaining")
-    df[HASH_COLUMN] = hashes
+    df[HASH_COLUMN] = df.apply(hash_triad, axis=1)
     sheets[COMPONENTS_SHEET] = df
+    # FIX: Use mode='w' instead of mode='overwrite'
     with pd.ExcelWriter(filepath, engine='openpyxl', mode='w') as writer:
         for sheet, data in sheets.items():
             data.to_excel(writer, sheet_name=sheet, index=False)
