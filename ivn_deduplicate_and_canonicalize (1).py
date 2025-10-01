@@ -142,18 +142,10 @@ def bulk_apply_canonical(df, col1, col2, pool_name, groups, log):
 
 def main():
     filepath = "ivntest.xlsx"
-    # Specify the Components worksheet
-    df = pd.read_excel(filepath, sheet_name="Components")
+    df = pd.read_excel(filepath)
 
     if "Canonicalization Pool" not in df.columns:
         df["Canonicalization Pool"] = ""
-
-    # Update COLUMN_PAIRS to match Components table columns
-    COMPONENT_COLUMN_PAIRS = [
-        ("component_name", "component_description", "ComponentInfo"),
-        ("source", "component_name", "SourceComponent"),
-        # Add other relevant pairs if needed
-    ]
 
     log = load_checkpoint()
 
@@ -182,11 +174,11 @@ def main():
             pass
         print("Invalid input. Please enter a number between 0.0 and 1.0.")
 
-    total_checks = len(COMPONENT_COLUMN_PAIRS)
+    total_checks = len(COLUMN_PAIRS)
     check_counter = 0
     overall_start = time.time()
 
-    for col1, col2, pool_name in COMPONENT_COLUMN_PAIRS:
+    for col1, col2, pool_name in COLUMN_PAIRS:
         check_counter += 1
         print(f"\n[{check_counter}/{total_checks}] Checking similarity for: {pool_name}")
         pair_start = time.time()

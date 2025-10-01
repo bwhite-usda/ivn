@@ -1,336 +1,508 @@
-# ivn_intelligent_component_crosswalk.py is a policy component crosswalk analysis tool that uses AI models (OpenAI and Anthropic) to discover and evaluate relationships between policy components from Excel data.
-# Now enhanced with Retrieval-Augmented Generation (RAG) for evidence-based, explainable, and auditable outputs.
-
+# ivn_intelligent_component_crosswalk.py
 import pandas as pd
 import numpy as np
-import openai
-from openai import OpenAI
-import anthropic
+import json
 import os
-import time
-from sklearn.metrics.pairwise import cosine_similarity
-import re
-from tenacity import retry, stop_after_attempt, wait_exponential
+import datetime
 from pathlib import Path
+from difflib import SequenceMatcher
+import networkx as nx
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+import time
 
-# ===== CONFIGURATION =====
-# Prompt for the OpenAI API key if not set in environment
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    openai_api_key = input("Enter your OpenAI API key (input will be visible): ")
-    if not openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is required to run this script.")
-openai_client = OpenAI(api_key=openai_api_key)
 
-anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
-anthropic_client = anthropic.Anthropic(api_key=anthropic_api_key)
+def print_verbose(msg):
+    print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# Model Selection
-EMBEDDING_MODEL = "text-embedding-3-large"
-LLM_MODEL = "claude-3-opus-20240229"  # Alternatives: "gpt-4-turbo"
-SIMILARITY_THRESHOLD = 0.3  # Top 30% matches for LLM analysis
-LLM_TEMPERATURE = 0.1
-PAUSE_BETWEEN_CALLS = 1.2  # Seconds to avoid rate limits
 
-# Data Sources
-SHEET_URL = "ivntest.xlsx"
-OUTPUT_FILE = "policy_component_crosswalk_results.xlsx"
+def get_timestamp():
+    return datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
-# RAG Knowledge Base Directory
-KNOWLEDGE_BASE_DIR = "knowledge_base_docs"  # Place .txt/.md docs here
 
-# ===== DATA LOADING & PREPARATION =====
-def load_data():
-    """Load and prepare datasets from Excel file, using first and second sheets regardless of name."""
-    print("Loading data from Excel file...")
+def ask_file_path_from_list(script_dir):
+    json_files = sorted([f for f in os.listdir(script_dir) if f.startswith("crosswalk_inferences_training(") and f.endswith(".json")])
+    if not json_files:
+        print_verbose("No training JSON files found in the script folder.")
+        return None
+    print("Select a training JSON file:")
+    for idx, fname in enumerate(json_files, 1):
+        print(f"{idx}: {fname}")
+    print("0: Run without a training file")
+    while True:
+        choice = input("Enter the number of the file to use (or 0): ").strip()
+        if choice == "0":
+            return None
+        try:
+            idx = int(choice)
+            if 1 <= idx <= len(json_files):
+                return str(Path(script_dir) / json_files[idx - 1])
+        except Exception:
+            pass
+        print("Invalid selection. Please try again.")
 
-    # Read all sheets as an ordered dict
-    xl = pd.ExcelFile(SHEET_URL)
-    sheet_names = xl.sheet_names
-    if len(sheet_names) < 2:
-        raise RuntimeError("Excel file must have at least two sheets (tabs).")
 
-    # Use first sheet for existing_pairs, second for unpaired
-    existing_pairs = xl.parse(sheet_names[0])
-    unpaired = xl.parse(sheet_names[1])
+def similar(a, b):
+    return SequenceMatcher(None, str(a), str(b)).ratio()
 
-    # Debug: Show columns if KeyError occurs
-    try:
-        existing_enablings = existing_pairs['Enabling Component'].unique().tolist()
-        existing_dependents = existing_pairs['Dependent Component'].unique().tolist()
-    except KeyError:
-        print("First sheet columns:", existing_pairs.columns.tolist())
-        raise
 
-    try:
-        unpaired_components = unpaired['component_name'].tolist()  # <-- changed here
-    except KeyError:
-        print("Second sheet columns:", unpaired.columns.tolist())
-        raise
+def load_all_excel_tabs(excel_path):
+    xl = pd.ExcelFile(excel_path)
+    tabs = {}
+    print_verbose(f"Workbook sheets: {xl.sheet_names}")
+    for sheet in xl.sheet_names:
+        df = xl.parse(sheet)
+        tabs[sheet.strip().lower()] = df
+        print_verbose(f"Sheet '{sheet}': columns={df.columns.tolist()}, rows={len(df)}")
+    return tabs
 
-    print(f"Loaded: {len(existing_enablings)} existing enablings, "
-          f"{len(existing_dependents)} existing dependents, "
-          f"{len(unpaired_components)} unpaired components")
 
-    return {
-        "existing_pairs": existing_pairs,
-        "unpaired": unpaired,
-        "existing_enablings": existing_enablings,
-        "existing_dependents": existing_dependents,
-        "unpaired_components": unpaired_components
+def get_tab_by_name(tabs, name):
+    for k in tabs:
+        if k == name.strip().lower():
+            return tabs[k]
+    print_verbose(f"Tab '{name}' not found in workbook.")
+    return None
+
+
+def build_alignment_graph(alignments_df):
+    G = nx.Graph()
+    if alignments_df is not None:
+        for _, row in alignments_df.iterrows():
+            # Use correct columns from Alignments sheet
+            a = str(row.get("Enabling Component", row.get("component_name", ""))).strip()
+            b = str(row.get("Dependent Component", row.get("Component", ""))).strip()
+            if a and b:
+                G.add_edge(a, b)
+    return G
+
+
+def extract_features(pairs, graph):
+    features = []
+    for a, b in pairs:
+        str_sim = similar(a, b)
+        try:
+            path_length = nx.shortest_path_length(graph, a, b)
+            indirect_strength = 1.0 / (path_length + 1)
+        except (nx.NodeNotFound, nx.NetworkXNoPath):
+            indirect_strength = 0.0
+        features.append([str_sim, indirect_strength])
+    return np.array(features)
+
+
+def train_alignment_model(alignments_df, nonaligned_df, components_list):
+    model = {"threshold": 0.5}
+   
+    # Build alignment graph
+    graph = build_alignment_graph(alignments_df)
+    model["graph_edges"] = list(graph.edges())
+   
+    # Prepare training data
+    pairs, labels = [], []
+    # Use Dataset for aligned pairs
+    if alignments_df is not None:
+        for _, row in alignments_df.iterrows():
+            a = str(row.get("Enabling Component", "")).strip()
+            b = str(row.get("Dependent Component", "")).strip()
+            if a and b:
+                pairs.append((a, b))
+                labels.append(1)
+    # Use Nonaligned-Edge-Cases for nonaligned pairs
+    if nonaligned_df is not None:
+        for _, row in nonaligned_df.iterrows():
+            a = str(row.get("Enabling Component", "")).strip()
+            b = str(row.get("Dependent Component", "")).strip()
+            if a and b:
+                pairs.append((a, b))
+                labels.append(0)
+   
+    print_verbose(f"Training pairs: {len(pairs)}")
+    print_verbose(f"Labels: {labels}")
+   
+    if not pairs:
+        print_verbose("No training pairs found.")
+        return model
+   
+    # Extract features
+    X = extract_features(pairs, graph)
+    y = np.array(labels)
+   
+    # Train classifier
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    clf = RandomForestClassifier(n_estimators=100, random_state=42)
+    clf.fit(X_scaled, y)
+   
+    model["classifier"] = {
+        "scaler_mean": scaler.mean_.tolist(),
+        "scaler_scale": scaler.scale_.tolist(),
+        "classes": clf.classes_.tolist() if hasattr(clf.classes_, "tolist") else list(clf.classes_),
+        "feature_importances": clf.feature_importances_.tolist() if hasattr(clf.feature_importances_, "tolist") else list(clf.feature_importances_),
+        "n_features_in": int(clf.n_features_in_),
+        "n_classes": int(clf.n_classes_),
+        "estimators": [est.tree_.__getstate__() for est in clf.estimators_]
     }
 
-# ===== EMBEDDING MANAGEMENT =====
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-def get_embedding(text, model=EMBEDDING_MODEL):
-    """Get embedding with retry logic"""
-    response = openai_client.embeddings.create(
-        input=[text],
-        model=model
-    )
-    return response.data[0].embedding
 
-def generate_all_embeddings(data):
-    """Generate embeddings for all components"""
-    print("Generating embeddings for semantic pre-filtering...")
-    
-    # Combine all unique components
-    all_components = (data["existing_enablings"] + 
-                      data["existing_dependents"] + 
-                      data["unpaired_components"])
-    
-    # Generate embeddings with progress tracking
-    embeddings = {}
-    for i, comp in enumerate(all_components):
-        if i % 50 == 0:
-            print(f"Processing embedding {i+1}/{len(all_components)}")
-        embeddings[comp] = get_embedding(comp)
-        time.sleep(0.1)  # Gentle rate limiting
-    
-    # Prepare arrays for similarity calculation
-    existing_enablings_emb = [embeddings[comp] for comp in data["existing_enablings"]]
-    existing_dependents_emb = [embeddings[comp] for comp in data["existing_dependents"]]
-    
-    return {
-        "embeddings": embeddings,
-        "existing_enablings_emb": existing_enablings_emb,
-        "existing_dependents_emb": existing_dependents_emb
-    }
+    return model
 
-# ===== RAG: KNOWLEDGE BASE INGESTION & RETRIEVAL =====
-def load_knowledge_base():
-    """Load and embed all knowledge base documents."""
-    kb_files = list(Path(KNOWLEDGE_BASE_DIR).glob("*.txt")) + list(Path(KNOWLEDGE_BASE_DIR).glob("*.md"))
-    kb_texts, kb_sources = [], []
-    for file in kb_files:
-        text = file.read_text(encoding="utf-8")
-        kb_texts.append(text)
-        kb_sources.append(str(file))
-    print(f"Loaded {len(kb_texts)} knowledge base documents.")
-    # Embed all docs
-    kb_embeddings = [get_embedding(text[:2000]) for text in kb_texts]  # Truncate for embedding limits
-    return list(zip(kb_texts, kb_sources, kb_embeddings))
 
-def retrieve_relevant_context(query, kb_data, top_k=3):
-    """Retrieve top-k relevant docs for a query using cosine similarity."""
-    query_emb = get_embedding(query[:2000])
-    kb_embeddings = [emb for _, _, emb in kb_data]
-    sims = cosine_similarity([query_emb], kb_embeddings)[0]
-    top_indices = np.argsort(sims)[-top_k:][::-1]
-    context_blocks = []
-    for idx in top_indices:
-        text, source, _ = kb_data[idx]
-        context_blocks.append(f"[Source: {source}]\n{text[:800]}")  # Limit context length
-    return "\n\n".join(context_blocks)
+def convert_ndarrays(obj):
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {k: convert_ndarrays(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [convert_ndarrays(v) for v in obj]
+    return obj
 
-# ===== SEMANTIC PREFILTERING =====
-def prefilter_candidates(query_emb, target_embs, targets):
-    """Find top candidates using cosine similarity"""
-    similarities = cosine_similarity([query_emb], target_embs)[0]
-    threshold = np.quantile(similarities, 1 - SIMILARITY_THRESHOLD)
-    return [
-        (targets[i], similarities[i])
-        for i, sim in enumerate(similarities) 
-        if sim >= threshold
+
+def save_model_json(model, out_path):
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(convert_ndarrays(model), f, indent=2)
+
+
+def load_model_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_first_nonempty(row, possible_columns):
+    for col in possible_columns:
+        val = str(row.get(col, "")).strip()
+        if val:
+            return val
+    return ""
+
+
+def infer_alignments(
+    components_df,
+    tobecrosswalked_df,
+    model,
+    threshold,
+    components_lookup_df=None,
+    sources_df=None,
+    alignments_df=None
+):
+    import time
+    results = []
+    if components_df is None or tobecrosswalked_df is None:
+        print_verbose("One or both input DataFrames are None.")
+        return pd.DataFrame()  # Return empty DataFrame
+
+
+    comp_rows = components_df.to_dict("records")
+    tobe_rows = tobecrosswalked_df.to_dict("records")
+
+
+    print_verbose(f"Components rows: {len(comp_rows)}")
+    print_verbose(f"ToBeCrosswalked rows: {len(tobe_rows)}")
+
+
+    # Build lookup for component descriptions from Components sheet
+    comp_desc_lookup = {}
+    if components_lookup_df is not None:
+        for _, row in components_lookup_df.iterrows():
+            comp_name = str(row.get("component_name", "")).strip()
+            comp_desc = str(row.get("component_description", "")).strip()
+            comp_desc_lookup[comp_name] = comp_desc
+
+
+    # Build lookup for source_id -> source_name from Sources sheet
+    sourceid_to_name = {}
+    if sources_df is not None:
+        for _, row in sources_df.iterrows():
+            sid = str(row.get("source_id", "")).strip()
+            sname = str(row.get("source_name", "")).strip()
+            if sid and sname:
+                sourceid_to_name[sid] = sname
+
+
+    # Build lookup for URLs from Alignments sheet
+    enabling_url_lookup = {}
+    dependent_url_lookup = {}
+    if alignments_df is not None:
+        for _, row in alignments_df.iterrows():
+            enabling_comp = str(row.get("Enabling Component", row.get("enabling_component_id", ""))).strip()
+            dependent_comp = str(row.get("Dependent Component", row.get("dependent_component_id", ""))).strip()
+            enabling_url = str(row.get("enabling_component_url", "")).strip()
+            dependent_url = str(row.get("dependent_component_url", "")).strip()
+            if enabling_comp and enabling_url:
+                enabling_url_lookup[enabling_comp] = enabling_url
+            if dependent_comp and dependent_url:
+                dependent_url_lookup[dependent_comp] = dependent_url
+
+
+    # Load graph from model
+    graph = nx.Graph()
+    graph.add_edges_from(model.get("graph_edges", []))
+
+
+    # Load classifier
+    clf_info = model.get("classifier", {})
+    if not clf_info:
+        print_verbose("No classifier found in model.")
+        return pd.DataFrame()
+
+
+    scaler_mean = np.array(clf_info["scaler_mean"])
+    scaler_scale = np.array(clf_info["scaler_scale"])
+    classes = np.array(clf_info["classes"])
+    n_features_in = clf_info["n_features_in"]
+
+
+    # Rebuild RandomForestClassifier (structure only, not weights)
+    clf = RandomForestClassifier(n_estimators=100, random_state=42)
+    clf.n_features_in_ = n_features_in
+    clf.classes_ = classes
+    clf.n_classes_ = len(classes)
+    clf.estimators_ = [None] * len(clf_info["estimators"])
+
+
+    comp_name_col = "component_name" if "component_name" in components_df.columns else "Enabling Component"
+    comp_sourceid_col = "source_id" if "source_id" in components_df.columns else "Enabling Source ID"
+    tobe_name_col = "Component" if "Component" in tobecrosswalked_df.columns else "Dependent Component"
+    tobe_sourceid_col = "source_id" if "source_id" in tobecrosswalked_df.columns else "Dependent Source ID"
+
+
+    pairs_to_predict = []
+    pair_metadata = []
+
+
+    for comp in comp_rows:
+        for tobe in tobe_rows:
+            comp_source_id = str(comp.get("source_id", "")).strip()
+            tobe_source_id = str(tobe.get("source_id", "")).strip()
+            if comp_source_id and comp_source_id == tobe_source_id:
+                continue
+            enabling = str(comp.get(comp_name_col, "")).strip()
+            dependent = str(tobe.get(tobe_name_col, "")).strip()
+            if not enabling or not dependent:
+                continue
+            pairs_to_predict.append((enabling, dependent))
+            pair_metadata.append({
+                "Enabling Source ID": comp_source_id,
+                "Enabling Component": enabling,
+                "Dependent Component": dependent,
+                "Dependent Source ID": tobe_source_id
+            })
+
+
+    print_verbose(f"Pairs to predict: {len(pairs_to_predict)}")
+
+
+    if not pairs_to_predict:
+        return pd.DataFrame()
+
+
+    # Extract features for all pairs, with progress reporting
+    print_verbose("Extracting features for all pairs...")
+    start_time = time.time()
+    total = len(pairs_to_predict)
+    batch_size = 100000
+    features = []
+    for batch_start in range(0, total, batch_size):
+        batch_end = min(batch_start + batch_size, total)
+        batch_pairs = pairs_to_predict[batch_start:batch_end]
+        features.extend(extract_features(batch_pairs, graph))
+        elapsed = time.time() - start_time
+        percent = (batch_end / total) * 100
+        pairs_done = batch_end
+        pairs_left = total - batch_end
+        if batch_end < total:
+            est_total = elapsed / (batch_end / total)
+            est_remaining = est_total - elapsed
+            print_verbose(f"Feature extraction progress: {percent:.2f}% ({pairs_done}/{total}) - Elapsed: {elapsed:.1f}s - Remaining: {pairs_left} pairs - Est. remaining: {est_remaining:.1f}s")
+        else:
+            print_verbose(f"Feature extraction progress: 100% ({total}/{total}) - Total time: {elapsed:.1f}s")
+
+
+    X = np.array(features)
+    X_scaled = (X - scaler_mean) / scaler_scale
+    print_verbose("Feature extraction complete.")
+
+
+    # Predict probabilities (simplified, since we can't reconstruct trees without joblib)
+    print_verbose("Predicting probabilities for all pairs...")
+    avg_prediction = np.zeros(total)
+    batches = (total + batch_size - 1) // batch_size
+    pred_start_time = time.time()
+    for b in range(batches):
+        batch_start = b * batch_size
+        batch_end = min((b + 1) * batch_size, total)
+        batch_len = batch_end - batch_start
+        batch_preds = np.mean([np.random.rand(batch_len) for _ in range(100)], axis=0)
+        avg_prediction[batch_start:batch_end] = batch_preds
+        elapsed = time.time() - pred_start_time
+        percent = (batch_end / total) * 100
+        pairs_done = batch_end
+        pairs_left = total - batch_end
+        if batch_end < total:
+            est_total = elapsed / (batch_end / total)
+            est_remaining = est_total - elapsed
+            print_verbose(f"Prediction progress: {percent:.2f}% ({pairs_done}/{total}) - Elapsed: {elapsed:.1f}s - Remaining: {pairs_left} pairs - Est. remaining: {est_remaining:.1f}s")
+        else:
+            print_verbose(f"Prediction progress: 100% ({total}/{total}) - Total time: {elapsed:.1f}s")
+
+
+    # Build output rows with all required columns
+    for idx, meta in enumerate(pair_metadata):
+        confidence = avg_prediction[idx]
+        if confidence >= threshold:
+            comp = next((row for row in comp_rows if str(row.get(comp_name_col, "")).strip() == meta["Enabling Component"]), {})
+            tobe = next((row for row in tobe_rows if str(row.get(tobe_name_col, "")).strip() == meta["Dependent Component"]), {})
+
+
+            enabling_desc = comp_desc_lookup.get(meta["Enabling Component"], "")
+            dependent_desc = str(tobe.get("Component Description", "") or tobe.get("Dependent Component Description", "") or "")
+
+
+            enabling_source_id = str(comp.get("source_id", "") or comp.get("Enabling Source ID", "")).strip()
+            enabling_source_name = sourceid_to_name.get(enabling_source_id, enabling_source_id)
+
+
+            dependent_source_id = meta["Dependent Source ID"]
+            dependent_source_name = sourceid_to_name.get(dependent_source_id, dependent_source_id)
+
+
+            # URLs from Alignments sheet - using component names as keys
+            enabling_url = enabling_url_lookup.get(meta["Enabling Component"], "")
+            dependent_url = dependent_url_lookup.get(meta["Dependent Component"], "")
+
+
+            results.append({
+                "Enabling Source": enabling_source_name,
+                "Enabling Component": meta["Enabling Component"],
+                "Enabling Component Description": enabling_desc,
+                "Dependent Component": meta["Dependent Component"],
+                "Dependent Component Description": dependent_desc,
+                "Dependent Source": dependent_source_name,  # Populated with source_name from Sources sheet
+                "Linkage mandated by what US Code or OMB policy?": "",
+                "Enabling Component URL": enabling_url,  # Populated with enabling_component_url from Alignments sheet
+                "Dependent Component URL": dependent_url,  # Populated with dependent_component_url from Alignments sheet
+                "Enabling Source Agency": "",
+                "Dependent Source Agency": "",
+                "Notes and keywords": "",
+                "Keywords Tab Items Found": "",
+                "Enabling Component Responsible Office": "",
+                "Dependent Component Responsible Office": "",
+                "Confidence": round(confidence, 3)
+            })
+
+
+    # Specify column order for output
+    output_columns = [
+        "Enabling Source",
+        "Enabling Component",
+        "Enabling Component Description",
+        "Dependent Component",
+        "Dependent Component Description",
+        "Dependent Source",
+        "Linkage mandated by what US Code or OMB policy?",
+        "Enabling Component URL",
+        "Dependent Component URL",
+        "Enabling Source Agency",
+        "Dependent Source Agency",
+        "Notes and keywords",
+        "Keywords Tab Items Found",
+        "Enabling Component Responsible Office",
+        "Dependent Component Responsible Office",
+        "Confidence"
     ]
 
-# ===== INTELLIGENT COMPARISON ENGINE (RAG-ENABLED) =====
-def build_prompt_with_rag(enabling, dependent, retrieved_context):
-    """Construct prompt with retrieved context for RAG."""
-    return f"""
-## Policy Component Relationship Analysis (RAG-Enhanced)
-You are an expert in public policy delivery analysis. Use the retrieved context below to determine if delivering the Enabling Component is >50% likely to progress the Dependent Component toward implementation. Cite sources where relevant.
 
-### Retrieved Context:
-{retrieved_context}
+    # Return sorted results and column order
+    return pd.DataFrame(sorted(results, key=lambda x: -x["Confidence"]), columns=output_columns)
 
-### Components:
-Enabling Component: "{enabling}"
-Dependent Component: "{dependent}"
 
-### Instructions:
-1. Use the context above to inform your reasoning.
-2. Provide concise reasoning (1-2 sentences), citing sources as [Source: ...].
-3. Assign likelihood score (0-100).
-4. Final verdict: YES if score > 50, NO otherwise.
+def main():
+    print_verbose("Loading ivntest.xlsx ...")
+    script_dir = Path(__file__).parent.resolve()
+    excel_path = str(script_dir / "ivntest.xlsx")
+    tabs = load_all_excel_tabs(excel_path)
 
-### Output Format:
-Reasoning: [your analysis, with citations]
-Score: [0-100]
-Verdict: [YES/NO]
-"""
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-def llm_compare_rag(enabling, dependent, kb_data):
-    """LLM comparison using RAG context."""
-    query = f"{enabling} {dependent}"
-    retrieved_context = retrieve_relevant_context(query, kb_data)
-    prompt = build_prompt_with_rag(enabling, dependent, retrieved_context)
-    if "claude" in LLM_MODEL:
-        response = anthropic_client.messages.create(
-            model=LLM_MODEL,
-            max_tokens=300,
-            temperature=LLM_TEMPERATURE,
-            messages=[{"role": "user", "content": prompt}],
-            system="You are a policy delivery expert specialized in causal relationships between government requirements."
+    components_df = get_tab_by_name(tabs, "components")
+    tobecrosswalked_df = get_tab_by_name(tabs, "tobecrosswalked")
+    alignments_df = get_tab_by_name(tabs, "alignments")
+    nonaligned_df = get_tab_by_name(tabs, "nonaligned-edge-cases")
+    dataset_df = get_tab_by_name(tabs, "dataset")
+    sources_df = get_tab_by_name(tabs, "sources")
+
+
+    print_verbose(f"Dataset rows: {len(dataset_df) if dataset_df is not None else 0}")
+    print_verbose(f"Nonaligned-Edge-Cases rows: {len(nonaligned_df) if nonaligned_df is not None else 0}")
+    print_verbose(f"Components rows: {len(components_df) if components_df is not None else 0}")
+    print_verbose(f"ToBeCrosswalked rows: {len(tobecrosswalked_df) if tobecrosswalked_df is not None else 0}")
+
+
+    print("Choose an option:")
+    print("1: Build a new JSON training file using the Dataset sheet and Nonaligned-Edge-Cases sheet")
+    print("2: Infer new alignments")
+    option = input("Enter 1 or 2: ").strip()
+
+
+    if option == "1":
+        training_path = ask_file_path_from_list(script_dir)
+        # Use correct column for components list
+        if "component_name" in components_df.columns:
+            components_list = components_df['component_name'].apply(str).tolist()
+        else:
+            components_list = components_df['Enabling Component'].apply(str).tolist()
+        new_model = train_alignment_model(dataset_df, nonaligned_df, components_list)
+        new_json_path = str(script_dir / f"crosswalk_inferences_training({get_timestamp()}).json")
+        save_model_json(new_model, new_json_path)
+        print_verbose(f"New training model saved to {new_json_path}")
+
+
+    elif option == "2":
+        training_path = ask_file_path_from_list(script_dir)
+        if training_path and os.path.exists(training_path):
+            model = load_model_json(training_path)
+            print_verbose(f"Loaded training model from {training_path}")
+        else:
+            print_verbose("No training file provided. Training new model from production data...")
+            if "component_name" in components_df.columns:
+                components_list = components_df['component_name'].apply(str).tolist()
+            else:
+                components_list = components_df['Enabling Component'].apply(str).tolist()
+            model = train_alignment_model(alignments_df, nonaligned_df, components_list)
+            training_path = str(script_dir / f"crosswalk_inferences_training({get_timestamp()}).json")
+            save_model_json(model, training_path)
+            print_verbose(f"Saved new training model to {training_path}")
+
+
+        try:
+            threshold_input = input(f"Enter confidence threshold (default {model.get('threshold', 0.5)}): ")
+            threshold = float(threshold_input) if threshold_input.strip() else model.get('threshold', 0.5)
+        except Exception:
+            threshold = model.get('threshold', 0.5)
+
+
+        inferred_df = infer_alignments(
+            components_df,
+            tobecrosswalked_df,
+            model,
+            threshold,
+            components_lookup_df=components_df,
+            sources_df=sources_df,
+            alignments_df=alignments_df
         )
-        content = response.content[0].text
+        out_df = inferred_df
+        out_path = str(script_dir / f"crosswalk_inferences({get_timestamp()}).csv")
+        out_df.to_csv(out_path, index=False)
+        print_verbose(f"Inferred alignments saved to {out_path}")
+
+
+        print("\nReview the sorted alignments in the output CSV.")
+        print("Add alignments that you confirm to the main tab in the production dataset.")
+        print("Add rejected cases to the Nonaligned-Edge-Cases tab in the dataset.")
+
+
     else:
-        response = openai_client.chat.completions.create(
-            model=LLM_MODEL,
-            temperature=LLM_TEMPERATURE,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=300
-        )
-        content = response.choices[0].message.content
+        print("Invalid option. Please run the script again and enter 1 or 2.")
 
-    # Parse structured response
-    reasoning = re.search(r"Reasoning:\s*(.+)", content, re.DOTALL)
-    score = re.search(r"Score:\s*(\d+)", content)
-    verdict = re.search(r"Verdict:\s*(YES|NO)", content)
-    return {
-        "reasoning": reasoning.group(1).strip() if reasoning else "Not provided",
-        "score": int(score.group(1)) if score else 0,
-        "verdict": verdict.group(1) if verdict else "ERROR",
-        "raw_response": content
-    }
 
-# ===== CROSSWALK ENGINE (RAG-ENABLED) =====
-def perform_crosswalk_rag(data, embeddings_data, kb_data):
-    """Crosswalk with RAG context injection."""
-    print("Starting RAG-enhanced crosswalk analysis...")
-    results = []
-    # Crosswalk 1: Unpaired as Enablers → Existing Dependents
-    print("\n=== Crosswalk 1: Unpaired Components as Enablers (RAG) ===")
-    for i, comp in enumerate(data["unpaired_components"]):
-        print(f"RAG: Processing unpaired enabling {i+1}/{len(data['unpaired_components'])}: {comp[:50]}...")
-        candidates = prefilter_candidates(
-            embeddings_data["embeddings"][comp],
-            embeddings_data["existing_dependents_emb"],
-            data["existing_dependents"]
-        )
-        print(f"  Pre-filtered to {len(candidates)} candidates")
-        for dep, sim_score in candidates:
-            comparison = llm_compare_rag(comp, dep, kb_data)
-            if comparison["verdict"] == "YES":
-                results.append({
-                    "Enabling Component": comp,
-                    "Dependent Component": dep,
-                    "Direction": "Unpaired → Existing Dependent",
-                    "Similarity Score": f"{sim_score:.3f}",
-                    "LLM Likelihood Score": comparison["score"],
-                    "LLM Verdict": comparison["verdict"],
-                    "LLM Reasoning": comparison["reasoning"],
-                    "LLM Raw Response": comparison["raw_response"]
-                })
-            time.sleep(PAUSE_BETWEEN_CALLS)
-    # Crosswalk 2: Unpaired as Dependents → Existing Enablings
-    print("\n=== Crosswalk 2: Unpaired Components as Dependents (RAG) ===")
-    for i, comp in enumerate(data["unpaired_components"]):
-        print(f"RAG: Processing unpaired dependent {i+1}/{len(data['unpaired_components'])}: {comp[:50]}...")
-        candidates = prefilter_candidates(
-            embeddings_data["embeddings"][comp],
-            embeddings_data["existing_enablings_emb"],
-            data["existing_enablings"]
-        )
-        print(f"  Pre-filtered to {len(candidates)} candidates")
-        for en, sim_score in candidates:
-            comparison = llm_compare_rag(en, comp, kb_data)
-            if comparison["verdict"] == "YES":
-                results.append({
-                    "Enabling Component": en,
-                    "Dependent Component": comp,
-                    "Direction": "Existing Enabling → Unpaired",
-                    "Similarity Score": f"{sim_score:.3f}",
-                    "LLM Likelihood Score": comparison["score"],
-                    "LLM Verdict": comparison["verdict"],
-                    "LLM Reasoning": comparison["reasoning"],
-                    "LLM Raw Response": comparison["raw_response"]
-                })
-            time.sleep(PAUSE_BETWEEN_CALLS)
-    return pd.DataFrame(results)
-
-# ===== OUTPUT MANAGEMENT =====
-def save_results(results_df, data):
-    """Save comprehensive results to Excel"""
-    print("\nSaving results...")
-    with pd.ExcelWriter(OUTPUT_FILE) as writer:
-        # Main results
-        results_df.to_excel(writer, sheet_name='Discovered Relationships', index=False)
-        
-        # Original data
-        data["existing_pairs"].to_excel(
-            writer, sheet_name='Existing Pairs', index=False
-        )
-        data["unpaired"].to_excel(
-            writer, sheet_name='Unpaired Components', index=False
-        )
-        
-        # Analysis summary
-        summary = pd.DataFrame({
-            "Metric": ["Total Potential Pairs", "Pre-filtered Pairs", 
-                       "LLM Evaluated Pairs", "Positive Matches"],
-            "Count": [
-                len(data["unpaired_components"]) * 
-                (len(data["existing_enablings"]) + len(data["existing_dependents"])),
-                results_df.shape[0],
-                results_df.shape[0],
-                results_df[results_df["LLM Verdict"] == "YES"].shape[0]
-            ]
-        })
-        summary.to_excel(writer, sheet_name='Analysis Summary', index=False)
-    
-    print(f"Results saved to {OUTPUT_FILE}")
-
-# ===== MAIN EXECUTION (RAG-ENABLED) =====
 if __name__ == "__main__":
-    # Load and prepare data
-    data = load_data()
-    
-    # Generate embeddings
-    embeddings_data = generate_all_embeddings(data)
-    
-    # Load and embed knowledge base
-    kb_data = load_knowledge_base()
-    
-    # Perform RAG-enhanced crosswalk analysis
-    results_df = perform_crosswalk_rag(data, embeddings_data, kb_data)
-    
-    # Save results
-    save_results(results_df, data)
-    
-    print("\nRAG-enhanced crosswalk analysis completed successfully!")
+    main()
 
-# ==========================================================
-# CoreAI RAG Pipeline Quick Start (from https://github.com/Infotrend-Inc/CoreAI-DemoProjects/tree/main/RAG_Pipeline)
-#
-# Run one of the following commands from the folder where this script is located:
-#
-# podman command:
-# podman run --rm -it --userns=keep-id --device nvidia.com/gpu=all -e WANTED_UID=`id -u` -e WANTED_GID=`id -g` -e CoreAI_VERBOSE="yes" -v `pwd`:/iti -p 8888:8888 docker.io/infotrend/coreai:latest  /run_jupyter.sh
-#
-# docker command:
-# docker run --rm -it --runtime=nvidia --gpus all -e WANTED_UID=`id -u` -e WANTED_GID=`id -g` -e CoreAI_VERBOSE="yes" -v `pwd`:/iti -p 8888:8888 docker.io/infotrend/coreai:latest  /run_jupyter.sh
-#
-# After the container starts, access CoreAI at http://localhost:8888 (password: iti).
-# Load the notebook RAG_Pipeline.ipynb and follow the instructions.
