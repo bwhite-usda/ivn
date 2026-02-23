@@ -1,21 +1,4 @@
-# PROMPT FOR NOVICE LLM:
-# Write a Python script that automates quality checks for a federal governance dataset exported from Google Sheets or loaded from a local file.
-# The script should:
-# 1. Ask the user if they want to select a local file or enter a URL for the dataset.
-# 2. If local file, provide a file navigator starting from the script's folder.
-# 3. Load the dataset from the selected local file or provided Google Sheets XLSX URL.
-# 4. Create a unified view of components (enabling and dependent) with columns for Source, Component, Description, and URL.
-# 5. Group similar components using fuzzy matching on Source and Component names.
-# 6. For each group, interactively prompt the user to resolve inconsistencies in Component names, Source names, Descriptions, and URLs by choosing the correct value.
-# 7. Flag errors in the original dataset for:
-#    - Components with multiple non-null descriptions
-#    - Different components with identical descriptions
-#    - Identical components with multiple URLs
-#    - Enabling-dependent component pairs from the same source document
-# 8. Track and print elapsed time for each major operation using the time module.
-# 9. Save the flagged dataset and error reports to an Excel file.
-# Use pandas, tqdm, requests, difflib, re, and os. Make the script easy to follow for a novice.
-# Update this prompt every time you update the script.
+# Spec source: see paired prompt file `ivn_components_error_checker_prompt.txt`. Keep this script and the prompt file synchronized.
 
 # ivn_components_error_checker.py automates quality checks for governance datasets, helping users quickly identify and review inconsistencies or potential errors in component descriptions, URLs, and source pairings.
 
@@ -38,6 +21,26 @@ import requests
 from io import BytesIO
 import time
 import os
+from datetime import datetime
+
+try:
+    # rapidfuzz is far faster than difflib for fuzzy ratios; falls back if unavailable
+    from rapidfuzz import fuzz
+
+    def similarity_ratio(a, b):
+        a = normalize_text(a)
+        b = normalize_text(b)
+        if not a and not b:
+            return 100
+        return fuzz.ratio(a, b)
+except ImportError:
+    def similarity_ratio(a, b):
+        """Pure Python implementation of similarity ratio"""
+        a = normalize_text(a)
+        b = normalize_text(b)
+        if not a and not b:
+            return 100
+        return SequenceMatcher(None, a, b).ratio() * 100
 
 def normalize_text(text):
     """Normalize text for fuzzy matching without external dependencies"""
@@ -48,50 +51,56 @@ def normalize_text(text):
     text = re.sub(r'\s+', ' ', text).strip()  # Remove extra spaces
     return text
 
-def similarity_ratio(a, b):
-    """Pure Python implementation of similarity ratio"""
-    a = normalize_text(a)
-    b = normalize_text(b)
-    if not a and not b:
-        return 100
-    return SequenceMatcher(None, a, b).ratio() * 100
-
-def get_component_groups(df, source_col, component_col):
-    """Create similarity-matched groups for (source, component) pairs"""
-    groups = {}
+def get_component_groups(df, source_col, component_col, threshold=95):
+    """Create similarity-matched groups for (source, component) pairs with blocking to avoid O(n^2)."""
+    groups = {}  # group_id -> representative (source_norm, component_norm)
+    buckets = {}  # blocking key -> set of group_ids
     group_map = {}
     group_counter = 0
-    
-    # Create normalized versions
+
+    # Create normalized versions once
     df['source_norm'] = df[source_col].apply(normalize_text)
     df['component_norm'] = df[component_col].apply(normalize_text)
-    
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Grouping components"):
-        source = row['source_norm']
-        component = row['component_norm']
-        matched_group = None
-        
-        # Skip empty components
+
+    def blocking_keys(source_norm, component_norm):
+        """Generate lightweight keys so we only compare plausible matches."""
+        comp_head = component_norm[:12]
+        src_head = source_norm[:12]
+        comp_token = component_norm.split(' ', 1)[0]
+        src_token = source_norm.split(' ', 1)[0]
+        return {
+            (comp_head, src_head),
+            (comp_token, src_token),
+            (component_norm[:5], source_norm[:5]),
+        }
+
+    for row in tqdm(df.itertuples(index=True), total=len(df), desc="Grouping components", mininterval=0.5):
+        idx = row.Index
+        source = row.source_norm
+        component = row.component_norm
         if not component:
             continue
-            
-        # Check against existing groups
-        for group_id, (group_source, group_component) in groups.items():
-            source_sim = similarity_ratio(source, group_source)
-            comp_sim = similarity_ratio(component, group_component)
-            
-            if source_sim >= 95 and comp_sim >= 95:
+
+        candidate_group_ids = set()
+        for key in blocking_keys(source, component):
+            candidate_group_ids.update(buckets.get(key, set()))
+
+        matched_group = None
+        for group_id in candidate_group_ids:
+            group_source, group_component = groups[group_id]
+            if similarity_ratio(source, group_source) >= threshold and similarity_ratio(component, group_component) >= threshold:
                 matched_group = group_id
                 break
-        
-        # Create new group if no match found
+
         if matched_group is None:
             group_counter += 1
             matched_group = group_counter
             groups[matched_group] = (source, component)
-        
+            for key in blocking_keys(source, component):
+                buckets.setdefault(key, set()).add(matched_group)
+
         group_map[idx] = matched_group
-    
+
     return group_map
 
 def prompt_user_choice(options, prompt_message):
@@ -143,24 +152,47 @@ def file_navigator(start_path):
             print("Invalid input. Try again.")
 
 def resolve_duplicates(df, col, group_col, threshold=95, prompt_message="Choose the correct value:"):
-    """Find similar values and prompt user to resolve duplicates."""
+    """Find similar values and prompt user to resolve duplicates with blocking to reduce comparisons."""
     df['norm'] = df[col].apply(normalize_text)
-    groups = {}
-    for idx, row in df.iterrows():
-        val = row['norm']
-        matched = False
-        for group_val in groups:
-            if similarity_ratio(val, group_val) >= threshold:
-                groups[group_val].append(idx)
-                matched = True
-                break
-        if not matched:
-            groups[val] = [idx]
-    for group_val, indices in groups.items():
+
+    # First handle exact-normalized duplicates quickly
+    exact_groups = df.groupby('norm').indices
+    to_process = []
+    for norm_val, indices in exact_groups.items():
+        original_values = df.loc[indices, col].dropna().unique()
+        if len(original_values) > 1:
+            to_process.append(indices)
+
+    # Now build fuzzy groups only across distinct normalized strings that look similar
+    norms = list(exact_groups.keys())
+    buckets = {}
+
+    def bucket_key(val):
+        return (val[:10], val.split(' ', 1)[0])
+
+    for norm_val in norms:
+        buckets.setdefault(bucket_key(norm_val), []).append(norm_val)
+
+    processed_norms = set()
+    for norm_bucket in buckets.values():
+        for i, left in enumerate(norm_bucket):
+            if left in processed_norms:
+                continue
+            current_indices = list(exact_groups[left])
+            for right in norm_bucket[i + 1:]:
+                if similarity_ratio(left, right) >= threshold:
+                    current_indices.extend(exact_groups[right])
+                    processed_norms.add(right)
+            if len(current_indices) > 1:
+                to_process.append(current_indices)
+            processed_norms.add(left)
+
+    for indices in to_process:
         original_values = df.loc[indices, col].dropna().unique()
         if len(original_values) > 1:
             chosen = prompt_user_choice(list(original_values), f"\n{prompt_message}\nOptions for similar '{col}':")
             df.loc[indices, col] = chosen
+
     df.drop(columns=['norm'], inplace=True)
     return df
 
@@ -240,13 +272,6 @@ def main():
     )
     print(f"FGDEC: Description resolution completed in {time.time() - start:.2f} seconds.")
 
-    print("FGDEC: Resolving multiple URLs...")
-    start = time.time()
-    components_df = resolve_duplicates(
-        components_df, 'URL', 'group_id', prompt_message="Choose the correct URL:"
-    )
-    print(f"FGDEC: URL resolution completed in {time.time() - start:.2f} seconds.")
-
     print("FGDEC: Checking for multiple descriptions...")
     start = time.time()
     for group_id, group_df in components_df.groupby('group_id'):
@@ -320,7 +345,25 @@ def main():
 
     print("FGDEC: Saving results...")
     start = time.time()
-    with pd.ExcelWriter('error_flagged_dataset.xlsx') as writer:
+    timestamp = datetime.now().strftime("%Y%m%d%H%M")
+    output_path = f"error_flagged_dataset_{timestamp}.xlsx"
+
+    readme_rows = [
+        {"Section": "Sheets", "Name": "READ_ME", "Description": "This page."},
+        {"Section": "Sheets", "Name": "Flagged Dataset", "Description": "Full dataset plus error flag columns."},
+        {"Section": "Sheets", "Name": "Multiple Descriptions", "Description": "Rows where the same component group has more than one non-null description."},
+        {"Section": "Sheets", "Name": "Same Description", "Description": "Different components that share an identical description."},
+        {"Section": "Sheets", "Name": "Multiple URLs", "Description": "Identical components that have more than one URL."},
+        {"Section": "Sheets", "Name": "Same Source Pairs", "Description": "Enabling and dependent components that come from the same source document."},
+        {"Section": "Flagged Dataset Columns", "Name": "ERROR: Multiple Descriptions", "Description": "Marked ENABLING/DEPENDENT when the component group has conflicting descriptions."},
+        {"Section": "Flagged Dataset Columns", "Name": "ERROR: Same Description", "Description": "Marked ENABLING/DEPENDENT when different components share the same description."},
+        {"Section": "Flagged Dataset Columns", "Name": "ERROR: Multiple URLs", "Description": "Marked ENABLING/DEPENDENT when identical components list more than one URL."},
+        {"Section": "Flagged Dataset Columns", "Name": "ERROR: Same Source Pair", "Description": "YES when enabling and dependent sources are effectively the same document."},
+    ]
+    readme_df = pd.DataFrame(readme_rows, columns=["Section", "Name", "Description"])
+
+    with pd.ExcelWriter(output_path) as writer:
+        readme_df.to_excel(writer, sheet_name='READ_ME', index=False)
         df.to_excel(writer, sheet_name='Flagged Dataset', index=False)
         error_reports = {
             "Multiple Descriptions": df[df['ERROR: Multiple Descriptions'] != ""],
@@ -330,7 +373,7 @@ def main():
         }
         for sheet_name, error_df in error_reports.items():
             error_df.to_excel(writer, sheet_name=sheet_name, index=False)
-    print(f"FGDEC: Results saved in {time.time() - start:.2f} seconds.")
+    print(f"FGDEC: Results saved to {output_path} in {time.time() - start:.2f} seconds.")
 
     print(f"FGDEC: Process completed successfully! Total elapsed time: {time.time() - start_total:.2f} seconds.")
 
