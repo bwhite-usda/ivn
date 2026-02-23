@@ -1,6 +1,6 @@
-# IMPORTANT: When modifying this script, you MUST update this comprehensive comment/LLM prompt to reflect ALL changes made.
-# This prompt serves as both documentation and instructions for future LLM modifications.
-# Keep this prompt updated with every change to maintain consistency between code and documentation.
+# IMPORTANT: Keep this script in bidirectional sync with the external prompt file `component_mapper_prompt.txt`.
+# After changing code, immediately update `component_mapper_prompt.txt` to reflect the new behavior.
+# When `component_mapper_prompt.txt` changes, treat it as the authoritative spec and update this script to match.
 
 # Create a Python script that performs fuzzy matching between components in two Excel sheets. The script should:
 # 1. Load data from 'Dataset' and 'ToBeCrosswalked' sheets in 'ivntest.xlsx'
