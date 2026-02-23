@@ -1,51 +1,8 @@
-"""
-PROMPT FOR NOVICE LLM:
-
-Create a Python script that extracts structured requirement components from PDF documents, specifically addressing issues with PDF extraction quality. The script should:
-
-1. Take a PDF input (either from URL or local file)
-2. Extract text while preserving document structure
-3. Identify proper section headers and hierarchies
-4. Fix hyphenation and text fragmentation issues common in PDF extraction
-5. Identify component names and descriptions that match a validated production dataset format
-6. Export to Excel with separate sheets for "Enabling" and "Dependent" components
-
-BACKGROUND CONTEXT:
-- PDF extraction often results in broken text with hyphenation issues and lost structure
-- Requirements documents have a hierarchical structure (sections, subsections)
-- Components should be based on document structure rather than arbitrary text splits
-- Source document names should be formal, complete names rather than filenames
-- Component descriptions should be clean, well-formed text without fragmentation
-
-KEY TECHNIQUES TO IMPLEMENT:
-- Use PDFMiner's layout analysis to identify document structure
-- Implement font size and style detection to identify headings
-- Create functions to fix hyphenated words and clean extracted text
-- Extract components based on document section hierarchy
-- Implement validation to ensure output quality
-- Properly format Excel output with appropriate columns and formatting
-
-The script should handle various PDF formats and structures while producing consistently high-quality output that matches a production dataset standard.
-
-REQUIRED OUTPUT FORMAT:
-- Excel file with two sheets: "Enabling Components" and "Dependent Components"
-- Each sheet should have exactly four columns: "Source", "Component", "Component Description", "Component URL"
-- Component names should preserve section numbers and be concise and meaningful
-- Component descriptions should be clean, complete sentences without hyphenation issues
-- The script should always prompt for document title confirmation and URL input
-
-IMPLEMENTATION APPROACH:
-1. Extract text with layout information to preserve structure
-2. Identify document sections based on font size, style, and numbering patterns
-3. Extract components from identified sections while preserving section numbers
-4. Clean and validate extracted components
-5. Format for export to Excel with proper structure and all required columns
-"""
-
 # ivn_extract_components_from_pdf.py
-# Updated: 2025-09-21
+# Updated: 2026-02-04
 # Description: Extracts properly structured requirement components from a PDF source document,
 # and exports IVN-compatible Enabling and Dependent inventories with required fields.
+# Prompt file: ivn_extract_components_from_pdf_prompt.txt (authoritative specification)
 
 import re
 import csv
@@ -154,7 +111,11 @@ def ask_for_pdf_path() -> tuple:
 
     component_url = ""
     if choice == "1":
-        component_url = input("Paste the full URL to the PDF: ").strip()
+        # Enforce a non-empty URL for remote downloads
+        while not component_url:
+            component_url = input("Paste the full URL to the PDF: ").strip()
+            if not component_url:
+                print("⚠️ URL is required. Please enter a valid URL.")
         return download_pdf_with_browser_headers(component_url), component_url
     elif choice == "2":
         try:
@@ -206,7 +167,7 @@ def clean_text(text: str) -> str:
     
     # Normalize quotes
     text = text.replace('"', '"').replace('"', '"')
-    text = text.replace('’, "'").replace('‘', "'")
+    text = text.replace('’', "'").replace('‘', "'")
     
     # Fix common OCR errors
     text = text.replace('|', 'I')
@@ -305,6 +266,91 @@ def extract_font_info(text_element):
                     return font_info
     
     return font_info
+
+def identify_source_document(pdf_path: Path, text: str) -> str:
+    """Extract formal document name from PDF metadata or content"""
+    print("🔍 Identifying source document name...")
+    
+    # Try to extract from PDF metadata first
+    suggested_title = ""
+    
+    # Try to use pikepdf if available or can be installed
+    if try_install_package("pikepdf"):
+        try:
+            import pikepdf
+            with pikepdf.open(pdf_path) as pdf:
+                if pdf.docinfo.get('/Title'):
+                    title = pdf.docinfo['/Title']
+                    if isinstance(title, bytes):
+                        title = title.decode('utf-8', errors='ignore')
+                    # Ensure we always store a plain string here
+                    suggested_title = str(title)
+                    print(f"  → Found title in PDF metadata: {suggested_title}")
+        except Exception as e:
+            print(f"  → Could not extract metadata with pikepdf: {e}")
+    else:
+        print("  → Proceeding without pikepdf for metadata extraction")
+    
+    # Normalize to a string before any length checks to avoid TypeError from non-str objects
+    if suggested_title is None:
+        suggested_title = ""
+    else:
+        suggested_title = str(suggested_title)
+    
+    # Try to extract from first few pages if no metadata title
+    if not suggested_title or len(suggested_title) < 10:
+        # Enhanced patterns for government document titles
+        title_patterns = [
+            # Common act patterns with number prefixes
+            r"(?i)(\d+(?:st|nd|rd|th)\s+Century\s+[A-Za-z\s]+Act(?:\s+of\s+\d{4})?)",
+            r"(?i)((?:The\s+)?[A-Z][A-Za-z\s]+Act\s+of\s+\d{4})",
+            r"(?i)((?:The\s+)?[A-Z][A-Za-z\s]+\s+Act)",
+            # Public laws and U.S. Code references
+            r"(?i)(Public\s+Law\s+\d+[-–]\d+)",
+            r"(?i)(Title\s+\d+[A-Z]*\s+of\s+the\s+.+?\s+Code)",
+            r"(?i)(\d+\s+U\.?S\.?C\.?\s+.*)",
+            # Federal Register and regulations
+            r"(?i)(Code\s+of\s+Federal\s+Regulations\s+.*)",
+            r"(?i)(Executive\s+Order\s+\d+)",
+            r"(?i)(Federal\s+Register\s+.*)",
+            # General document titles in all caps
+            r"([A-Z][A-Z\s]{10,}(?:\s+[A-Z]+){1,})"
+        ]
+        
+        first_pages = text[:8000]  # Examine more text to find the title
+        for pattern in title_patterns:
+            matches = re.findall(pattern, first_pages)
+            if matches:
+                # Use the longest match as it's likely the most complete title
+                if isinstance(matches[0], tuple):
+                    # If the match is a tuple (from capturing groups), use the first group
+                    matches = [m[0] for m in matches]
+                
+                matches.sort(key=len, reverse=True)
+                result = matches[0]
+                print(f"  → Found title in document: {result}")
+                suggested_title = result
+                break
+    
+    # Additional cleanup for detected titles
+    if suggested_title:
+        # Fix common OCR issues in titles
+        suggested_title = re.sub(r'(?<!\d)l(?=\d)', '1', suggested_title)  # Replace lone 'l' with '1' before digits
+        suggested_title = re.sub(r'\s+', ' ', suggested_title).strip()  # Normalize whitespace
+    
+    # If still no title, use filename
+    if not suggested_title:
+        suggested_title = pdf_path.stem.replace('_', ' ').title()
+    
+    # Always prompt for confirmation of title
+    print(f"\n📝 Suggested document title: {suggested_title}")
+    user_title = input("Press Enter to accept this title, or type a new title: ").strip()
+    
+    # Use user input if provided, otherwise use suggested title
+    final_title = user_title if user_title else suggested_title
+    print(f"✅ Using document title: {final_title}")
+    
+    return final_title
 
 def identify_sections(layout_elements: list) -> dict:
     """Identify document sections based on layout information with enhanced pattern recognition"""
@@ -682,84 +728,6 @@ def try_install_package(package_name):
         except Exception as e:
             print(f"❌ Failed to install {package_name}: {e}")
             return False
-
-def identify_source_document(pdf_path: Path, text: str) -> str:
-    """Extract formal document name from PDF metadata or content"""
-    print("🔍 Identifying source document name...")
-    
-    # Try to extract from PDF metadata first
-    suggested_title = ""
-    
-    # Try to use pikepdf if available or can be installed
-    if try_install_package("pikepdf"):
-        try:
-            import pikepdf
-            with pikepdf.open(pdf_path) as pdf:
-                if pdf.docinfo.get('/Title'):
-                    title = pdf.docinfo['/Title']
-                    if isinstance(title, bytes):
-                        title = title.decode('utf-8', errors='ignore')
-                    print(f"  → Found title in PDF metadata: {title}")
-                    suggested_title = title
-        except Exception as e:
-            print(f"  → Could not extract metadata with pikepdf: {e}")
-    else:
-        print("  → Proceeding without pikepdf for metadata extraction")
-    
-    # Try to extract from first few pages if no metadata title
-    if not suggested_title or len(suggested_title) < 10:
-        # Enhanced patterns for government document titles
-        title_patterns = [
-            # Common act patterns with number prefixes
-            r"(?i)(\d+(?:st|nd|rd|th)\s+Century\s+[A-Za-z\s]+Act(?:\s+of\s+\d{4})?)",
-            r"(?i)((?:The\s+)?[A-Z][A-Za-z\s]+Act\s+of\s+\d{4})",
-            r"(?i)((?:The\s+)?[A-Z][A-Za-z\s]+\s+Act)",
-            # Public laws and U.S. Code references
-            r"(?i)(Public\s+Law\s+\d+[-–]\d+)",
-            r"(?i)(Title\s+\d+[A-Z]*\s+of\s+the\s+.+?\s+Code)",
-            r"(?i)(\d+\s+U\.?S\.?C\.?\s+.*)",
-            # Federal Register and regulations
-            r"(?i)(Code\s+of\s+Federal\s+Regulations\s+.*)",
-            r"(?i)(Executive\s+Order\s+\d+)",
-            r"(?i)(Federal\s+Register\s+.*)",
-            # General document titles in all caps
-            r"([A-Z][A-Z\s]{10,}(?:\s+[A-Z]+){1,})"
-        ]
-        
-        first_pages = text[:8000]  # Examine more text to find the title
-        for pattern in title_patterns:
-            matches = re.findall(pattern, first_pages)
-            if matches:
-                # Use the longest match as it's likely the most complete title
-                if isinstance(matches[0], tuple):
-                    # If the match is a tuple (from capturing groups), use the first group
-                    matches = [m[0] for m in matches]
-                
-                matches.sort(key=len, reverse=True)
-                result = matches[0]
-                print(f"  → Found title in document: {result}")
-                suggested_title = result
-                break
-    
-    # Additional cleanup for detected titles
-    if suggested_title:
-        # Fix common OCR issues in titles
-        suggested_title = re.sub(r'(?<!\d)l(?=\d)', '1', suggested_title)  # Replace lone 'l' with '1' before digits
-        suggested_title = re.sub(r'\s+', ' ', suggested_title).strip()  # Normalize whitespace
-    
-    # If still no title, use filename
-    if not suggested_title:
-        suggested_title = pdf_path.stem.replace('_', ' ').title()
-    
-    # Always prompt for confirmation of title
-    print(f"\n📝 Suggested document title: {suggested_title}")
-    user_title = input("Press Enter to accept this title, or type a new title: ").strip()
-    
-    # Use user input if provided, otherwise use suggested title
-    final_title = user_title if user_title else suggested_title
-    print(f"✅ Using document title: {final_title}")
-    
-    return final_title
 
 def clean_component_name(header: str) -> str:
     """Clean component name to be concise and meaningful - preserving section numbers"""
