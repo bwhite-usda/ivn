@@ -1,0 +1,57 @@
+Problem Explanation:
+The validate_updates.py script checks that all staged updates conform to the required response schema, ensuring data integrity before updates are applied to the master Excel file.
+
+Broader Context:
+This script is part of the IVN automation system, which enforces schema compliance and human review before any data is written to the master Excel workbook.
+
+Concepts to Understand:
+- JSON schema validation
+- Reading JSONL files
+- Error reporting
+
+Prerequisite Knowledge:
+- Python scripting
+- JSON and JSON schema
+
+Domain-Specific Terms:
+- staged update: A proposed change awaiting review
+- response schema: The required structure for transformation responses
+
+High-Level Description:
+The script reads each staged update, validates the response against the schema, and reports any validation errors or confirms validity.
+
+Why the Script Exists:
+To provide a fast, automated check that all staged updates are schema-compliant before they are applied to the Excel file.
+
+Role of the Script:
+Validator for staged updates, ensuring only valid updates proceed to application.
+
+Key Concepts and Learning Data:
+- Schema validation
+- Error reporting
+
+
+Input/Output Definitions:
+Input: data/updates_staged.jsonl (staged updates)
+Output: Console output listing validation results for each update
+
+Output Structure and Validity Checks:
+- Each line is checked against the response schema.
+- Output is a line-by-line report of validation status.
+
+Success Criteria:
+- All valid updates are reported as OK.
+- Invalid updates are reported with error details.
+
+Error Handling:
+- Reports validation errors with line numbers.
+- Continues checking all updates after errors.
+
+Evaluation of Output:
+- Review console output for validation status of each update.
+
+Correct Learning Model Behavior:
+- The model should be able to regenerate the script to perform all described tasks, with correct input/output handling and error reporting.
+
+Example Scenario:
+- Given a staged update file with 3 updates, the script should report OK for valid updates and detailed errors for invalid ones.
