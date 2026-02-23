@@ -155,6 +155,16 @@ def validate_content(url: str, content: str) -> tuple[bool, str]:
         return False, "TOO_SHORT"
     return True, "OK"
 
+def sanitize_for_excel(text):
+    """Remove characters that are not compatible with Excel cells."""
+    if not text or not isinstance(text, str):
+        return text
+    
+    # Remove ASCII control characters (0-31) except allowed ones
+    allowed = [9, 10, 13]  # Tab, LF, CR
+    result = ''.join(c for c in text if ord(c) >= 32 or ord(c) in allowed)
+    return result
+
 # --------------- Fetch Logic ------------------
 def fetch_url_content(session: requests.Session, url: str, max_retries: int = MAX_RETRIES) -> tuple[str, str]:
     """
@@ -304,6 +314,7 @@ def main():
 
     print(f"Processing {total_rows} rows...")
     loop_start = time.time()
+    overall_start_time = time.time()
 
     for i, (idx, row) in enumerate(df.iterrows(), start=1):
         row_start = time.time()
@@ -325,43 +336,48 @@ def main():
         dependent_status = ""
 
         # Enabling Component Logic
-        if enabling_desc and enabling_desc != enabling_comp:
+        if not enabling_comp:
+            enabling_derived_desc = None
+            enabling_status = ""
+        elif enabling_desc and enabling_desc != enabling_comp:
             enabling_derived_desc = enabling_desc
             enabling_status = "COPIED"
+        elif not enabling_url:
+            enabling_derived_desc = "[NO URL PROVIDED]"
+            enabling_status = "SKIPPED-NO-URL"
         else:
-            if not enabling_url:
-                enabling_derived_desc = "[NO URL PROVIDED]"
-                enabling_status = "SKIPPED-NO-URL"
+            if enabling_url in url_cache:
+                raw_content, fetch_status = url_cache[enabling_url]
+                enabling_status = "CACHED" if fetch_status == "SUCCESS" else fetch_status
             else:
-                if enabling_url in url_cache:
-                    raw_content, fetch_status = url_cache[enabling_url]
-                    enabling_status = "CACHED" if fetch_status == "SUCCESS" else fetch_status
-                else:
-                    raw_content, fetch_status = fetch_url_content(session, enabling_url)
-                    url_cache[enabling_url] = (raw_content, fetch_status)
-                    enabling_status = fetch_status
+                raw_content, fetch_status = fetch_url_content(session, enabling_url)
+                url_cache[enabling_url] = (raw_content, fetch_status)
+                enabling_status = fetch_status
 
-                if enabling_status in ("SUCCESS", "CACHED"):
-                    cleaned = sanitize_content(raw_content)
-                    ok, reason = validate_content(enabling_url, cleaned)
-                    if ok:
-                        enabling_derived_desc = cleaned
-                        if enabling_status == "SUCCESS":
-                            enabling_status = "SUCCESS"
-                    else:
-                        enabling_derived_desc = f"[NO MEANINGFUL CONTENT - {reason}]"
-                        enabling_status = f"ERROR:{reason}"
-                        failures.append((idx, "ENABLING", enabling_url, enabling_status))
+            if enabling_status in ("SUCCESS", "CACHED"):
+                cleaned = sanitize_content(raw_content)
+                ok, reason = validate_content(enabling_url, cleaned)
+                if ok:
+                    enabling_derived_desc = cleaned
+                    if enabling_status == "SUCCESS":
+                        enabling_status = "SUCCESS"
                 else:
-                    enabling_derived_desc = raw_content
+                    enabling_derived_desc = f"[NO MEANINGFUL CONTENT - {reason}]"
+                    enabling_status = f"ERROR:{reason}"
                     failures.append((idx, "ENABLING", enabling_url, enabling_status))
+            else:
+                enabling_derived_desc = raw_content
+                failures.append((idx, "ENABLING", enabling_url, enabling_status))
 
-        enabling_derived_desc = (enabling_derived_desc or "")[:MAX_EXCEL_CELL]
+        enabling_derived_desc = (enabling_derived_desc or "")[:MAX_EXCEL_CELL] if enabling_derived_desc is not None else None
         df.at[idx, "Enabling Component Description"] = enabling_derived_desc
         df.at[idx, "Enabling Fetch Status"] = enabling_status
 
         # Dependent Component Logic
-        if dependent_desc and dependent_desc != dependent_comp:
+        if not dependent_comp:
+            dependent_derived_desc = None
+            dependent_status = ""
+        elif dependent_desc and dependent_desc != dependent_comp:
             dependent_derived_desc = dependent_desc
             dependent_status = "COPIED"
         else:
@@ -392,7 +408,7 @@ def main():
                     dependent_derived_desc = raw_content
                     failures.append((idx, "DEPENDENT", dependent_url, dependent_status))
 
-        dependent_derived_desc = (dependent_derived_desc or "")[:MAX_EXCEL_CELL]
+        dependent_derived_desc = (dependent_derived_desc or "")[:MAX_EXCEL_CELL] if dependent_derived_desc is not None else None
         df.at[idx, "Dependent Component Description"] = dependent_derived_desc
         df.at[idx, "Dependent Fetch Status"] = dependent_status
 
@@ -405,7 +421,77 @@ def main():
         remaining = total_rows - i
         eta_seconds = remaining * avg_row_time
         eta_m, eta_s = divmod(int(eta_seconds), 60)
-        print(f"[{i}/{total_rows}] Enabling Status={enabling_status}, Dependent Status={dependent_status} ETA ~ {eta_m}m {eta_s}s")
+        
+        # Calculate overall progress
+        elapsed_time = time.time() - overall_start_time
+        completion_pct = (i / total_rows) * 100
+        
+        # Format overall time remaining
+        if i > 5:  # Wait for a few iterations to get a stable estimate
+            estimated_total_time = (elapsed_time / i) * total_rows
+            remaining_total = max(0, estimated_total_time - elapsed_time)
+            rem_hrs, remainder = divmod(int(remaining_total), 3600)
+            rem_mins, rem_secs = divmod(remainder, 60)
+            time_str = f"{rem_hrs}h {rem_mins}m {rem_secs}s" if rem_hrs > 0 else f"{rem_mins}m {rem_secs}s"
+            print(f"[{i}/{total_rows}] ({completion_pct:.1f}%) Enabling Status={enabling_status}, Dependent Status={dependent_status}")
+            print(f"   Row ETA: {eta_m}m {eta_s}s | Overall: {time_str} remaining | Elapsed: {int(elapsed_time/60)}m {int(elapsed_time%60)}s")
+        else:
+            print(f"[{i}/{total_rows}] ({completion_pct:.1f}%) Enabling Status={enabling_status}, Dependent Status={dependent_status} ETA ~ {eta_m}m {eta_s}s")
+
+    # Consolidate duplicate records based on specified columns, keeping the row with the most detailed info in description/office fields
+    group_cols = [
+        "Enabling Source", "Enabling Component", "Dependent Component", "Dependent Source",
+        "Enabling Component URL", "Dependent Component URL", "Enabling Source Agency", "Dependent Source Agency"
+    ]
+    detail_cols = [
+        "Enabling Component Description", "Dependent Component Description",
+        "Enabling Component Responsible Office", "Dependent Component Responsible Office"
+    ]
+
+    def pick_most_detailed(group):
+        # For each detail column, pick the row with the longest non-null value
+        row = group.iloc[0].copy()
+        for col in detail_cols:
+            max_val = None
+            max_len = -1
+            for val in group[col]:
+                if pd.notna(val) and str(val).strip():
+                    l = len(str(val))
+                    if l > max_len:
+                        max_len = l
+                        max_val = val
+            row[col] = max_val
+        return row
+
+    # Save duplicated groups to a separate Excel file before consolidation
+    duplicated_mask = df.duplicated(group_cols, keep=False)
+    duplicated_df = df[duplicated_mask].copy()
+    if not duplicated_df.empty:
+        dup_path = os.path.join(SCRIPT_DIR, "Duplicated Dependent Components.xlsx")
+        duplicated_df.to_excel(dup_path, index=False)
+        print(f"Duplicated Dependent Components saved: {dup_path}")
+    else:
+        print("No duplicated Dependent Components found.")
+
+    if all(col in df.columns for col in group_cols + detail_cols):
+        df = df.groupby(group_cols, as_index=False).apply(pick_most_detailed).reset_index(drop=True)
+
+    # Apply Excel sanitization to the description fields
+    print("Sanitizing content for Excel compatibility...")
+    for idx in df.index:
+        df.at[idx, "Enabling Component Description"] = sanitize_for_excel(df.at[idx, "Enabling Component Description"])
+        df.at[idx, "Dependent Component Description"] = sanitize_for_excel(df.at[idx, "Dependent Component Description"])
+    
+    # Save main Excel with error handling
+    print(f"Saving enriched workbook: {OUTPUT_XLSX}")
+    try:
+        df.to_excel(OUTPUT_XLSX, index=False)
+    except Exception as e:
+        print(f"Error saving Excel file: {e}")
+        csv_fallback = OUTPUT_XLSX.replace('.xlsx', '.csv')
+        print(f"Attempting to save as CSV instead: {csv_fallback}")
+        df.to_csv(csv_fallback, index=False)
+        print(f"CSV file saved successfully. Excel failed due to illegal characters.")
 
     # Summary
     enabling_summary_counts = df["Enabling Fetch Status"].value_counts().to_dict()
@@ -418,10 +504,6 @@ def main():
     for k, v in dependent_summary_counts.items():
         print(f"{k}: {v}")
     print("--------------")
-
-    # Save main Excel
-    print(f"Saving enriched workbook: {OUTPUT_XLSX}")
-    df.to_excel(OUTPUT_XLSX, index=False)
 
     # Failure CSV
     if failures:
