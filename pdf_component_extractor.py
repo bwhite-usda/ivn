@@ -1,4 +1,4 @@
-# pdf_component_extractor.py is a command-line tool for extracting structured components from PDF documents and saving them as a CSV file. It is designed to run on Android (or other platforms) using pure Python.
+# pdf_component_extractor.py is a command-line tool for extracting structured components from PDF documents and saving them as a TSV file. It is designed to run on Android (or other platforms) using pure Python.
 
 #!/usr/bin/env python3
 # PDF Component Extractor (pdf_component_extractor.py)
@@ -6,298 +6,229 @@
 # Usage: python pdf_component_extractor.py
 
 import re
-import csv
 import os
 import sys
 from pathlib import Path
-import PyPDF2
-import string
+import fitz  # PyMuPDF
 from datetime import datetime
+import openpyxl
+import hashlib
+import tkinter as tk
+from tkinter import filedialog
+import joblib
+
+MAX_FILENAME_BASE_LEN = 120  # to avoid Windows MAX_PATH issues
+
 
 def clear_screen():
     """Clear terminal screen"""
     os.system('cls' if os.name == 'nt' else 'clear')
 
-def show_menu(title, options, back=True):
-    """Display a menu and get user selection"""
-    clear_screen()
-    print(f"\n{title}")
-    print("=" * 40)
-    
-    for i, option in enumerate(options, 1):
-        print(f"{i}. {option}")
-    
-    if back:
-        print("0. Back")
-    
-    return input("\nEnter your choice: ").strip()
-
-def browse_files(start_dir):
-    """Text-based file browser for directory navigation"""
-    current_dir = Path(start_dir)
-    
-    while True:
-        # Get directory contents
-        dirs = []
-        files = []
-        
-        try:
-            for item in current_dir.iterdir():
-                if item.is_dir():
-                    dirs.append(f"{item.name}/")
-                elif item.suffix.lower() == '.pdf':
-                    files.append(item.name)
-        except Exception as e:
-            return None, f"Error accessing directory: {str(e)}"
-        
-        # Sort directories and files
-        dirs.sort()
-        files.sort()
-        
-        # Create menu options
-        options = dirs + files
-        if not options:
-            options = ["No PDF files found"]
-        
-        # Show menu
-        choice = show_menu(f"Current Directory: {current_dir}", options, current_dir != start_dir)
-        
-        # Handle back command
-        if choice == '0' and current_dir != start_dir:
-            current_dir = current_dir.parent
-            continue
-        elif choice == '0':
-            return None, "Operation cancelled"
-        
-        # Handle selection
-        try:
-            choice_index = int(choice) - 1
-            if 0 <= choice_index < len(options):
-                selected = options[choice_index]
-                selected_path = current_dir / selected.rstrip('/')
-                
-                if selected.endswith('/'):  # Directory
-                    current_dir = selected_path
-                else:  # File
-                    return selected_path, None
-            else:
-                input("\nInvalid choice. Press Enter to try again...")
-        except ValueError:
-            input("\nPlease enter a number. Press Enter to continue...")
-
-def extract_pdf_text(pdf_path):
-    """Extract text from PDF using PyPDF2"""
-    text_pages = []
-    try:
-        with open(pdf_path, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
-            for page_num in range(len(reader.pages)):
-                page = reader.pages[page_num]
-                page_text = page.extract_text()
-                text_pages.append(page_text if page_text else "")
-    except Exception as e:
-        raise RuntimeError(f"Failed to extract text from PDF: {str(e)}")
-    
-    return text_pages
-
 def get_pdf_title(pdf_path):
-    """Extract the Title field from PDF document properties."""
-    try:
-        with open(pdf_path, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
-            info = reader.metadata
-            title = info.title if info and info.title else Path(pdf_path).stem
-            return title.strip()
-    except Exception:
-        return Path(pdf_path).stem
-
-def get_bookmarks(reader):
-    """Flatten all bookmarks (including nested) into a list of (title, page_number) tuples."""
-    bookmarks = []
-    def walk(outlines):
-        for item in outlines:
-            if isinstance(item, list):
-                walk(item)
-            else:
-                try:
-                    title = item.title if hasattr(item, 'title') else str(item)
-                    page_num = reader.get_destination_page_number(item)
-                    bookmarks.append((title.strip(), page_num))
-                except Exception:
-                    continue
-    try:
-        walk(reader.outline)
-    except Exception:
-        try:
-            walk(reader.outlines)
-        except Exception:
-            pass
-    # Remove duplicates and sort by page number, but keep all bookmarks
-    seen = set()
-    unique_bookmarks = []
-    for title, page_num in bookmarks:
-        key = (title, page_num)
-        if key not in seen:
-            unique_bookmarks.append((title, page_num))
-            seen.add(key)
-    # Sort by page number, but preserve original order for bookmarks on the same page
-    unique_bookmarks.sort(key=lambda x: (x[1], bookmarks.index(x)))
-    return unique_bookmarks
-
-def extract_sections_by_bookmarks(pdf_path):
-    """Extract sections based on PDF bookmarks."""
-    with open(pdf_path, 'rb') as file:
-        reader = PyPDF2.PdfReader(file)
-        text_pages = []
-        for page_num in range(len(reader.pages)):
-            page = reader.pages[page_num]
-            page_text = page.extract_text()
-            text_pages.append(page_text if page_text else "")
-        bookmarks = get_bookmarks(reader)
-        sections = []
-        for i, (title, start_page) in enumerate(bookmarks):
-            end_page = bookmarks[i+1][1] if i+1 < len(bookmarks) else len(text_pages)
-            section_text = "\n".join(text_pages[start_page:end_page]).strip()
-            sections.append({
-                "heading": title,
-                "content": section_text
-            })
-        return sections
-
-def normalize_heading(heading):
-    """Trim, remove control characters, and title-case the heading."""
-    # Remove non-printable/control characters
-    heading = ''.join(ch for ch in heading if ch in string.printable)
-    heading = heading.strip()
-    # Optionally, title-case headings (comment out if not wanted)
-    heading = heading.title()
-    return heading
+    doc = fitz.open(pdf_path)
+    title = doc.metadata.get("title", Path(pdf_path).stem)
+    return title.strip()
 
 def normalize_text(text):
     """Clean and normalize text content with all required replacements and enhancements"""
-    # Remove non-printable/control characters
-    text = ''.join(ch for ch in text if ch in string.printable or ch in '\n\r')
-    
-    # Remove common headers/footers/page numbers (basic patterns, adjust as needed)
-    # Example: Remove lines that are just numbers (page numbers)
-    text = re.sub(r'^\s*\d+\s*$', '', text, flags=re.MULTILINE)
-    # Example: Remove lines that match "Page X" or "Page X of Y"
-    text = re.sub(r'^\s*Page\s+\d+(\s+of\s+\d+)?\s*$', '', text, flags=re.MULTILINE)
-    
     replacements = [
-        (r'—', '--'),          # Em-dash to two en-dashes
-        (r'‘', "'"),           # Left single smart quote
-        (r'’', "'"),           # Right single smart quote
-        (r'â€™', "'"),         # Fix encoding: right single quote
-        (r'“', '"'),           # Left double smart quote
-        (r'”', '"'),           # Right double smart quote
-        (r'\t', ' '),          # Tabs to spaces
-        (r'•\s*', '- '),       # Bullets to dashes
-        (r'\s*-\s+', '-'),     # Fix hyphenated words
+        (r'—', '--'),
+        (r'‘', "'"),
+        (r'’', "'"),
+        (r'â€™', "'"),
+        (r'“', '"'),
+        (r'”', '"'),
+        (r'\t', ' '),
+        (r'•\s*', '- '),
+        (r'\s*-\s+', '-'),
     ]
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text)
-    
-    # Consistent line break handling: replace multiple line breaks with a single one, then flatten to single space
     text = re.sub(r'\n+', '\n', text)
     text = re.sub(r'[ \t]+', ' ', text)
     text = re.sub(r'\s+', ' ', text)
-    
     return text.strip()
+
+def extract_components(pdf_path: Path, page_header_pattern: str | None = None):
+    """Extract structured components from a PDF using generalized heading rules and atomic splitting."""
+    doc = fitz.open(pdf_path)
+
+    # Build full text per page and keep line-level info for regex-based detection
+    pages_text: list[str] = []
+    for i in range(doc.page_count):
+        page_text = doc.load_page(i).get_text("text") or ""
+        page_text = page_text.replace("\t", " ")
+        pages_text.append(page_text)
+
+    full_text = "\n".join(pages_text)
+
+    # Regex-based heading detection in plain text
+    heading_patterns = [
+        r"^(FC\s+\d+\.\d+.*)$",                 # FC 1.000 Scope
+        r"^(Part\s+\d+\b.*)$",                   # Part 5 – Publicizing ...
+        r"^(\d+\.\s+.+)$",                       # 3. Citation System
+        r"^([A-Z][A-Z\s,&\-]{8,})$",              # ALL-CAPS headings, min length 8
+        r"^(Appendix\s+[A-Z0-9]+.*)$",              # Appendix sections
+        r"^(Immediate Agency Actions.*)$",           # Initiative phrase headings
+        r"^(Federal HR 2.0.*)$",                    # Initiative phrase headings
+        r"^(Core HCM.*)$",                          # Initiative phrase headings
+        r"^(Advisory Board.*)$",                    # Initiative phrase headings
+        r"^(Transition.*)$",                        # Initiative phrase headings
+        r"^(Platform.*)$",                          # Initiative phrase headings
+        r"^(Initiative.*)$",                        # Initiative phrase headings
+        r"^(Agency Actions.*)$",                    # Initiative phrase headings
+        r"^(Agency Transitions.*)$",                # Initiative phrase headings
+    ]
+    combined_heading_regex = re.compile("|".join(f"({p})" for p in heading_patterns), re.MULTILINE)
+
+    matches = list(combined_heading_regex.finditer(full_text))
+    components: list[dict[str, str]] = []
+
+    # Load atomic extraction algorithm
+    extractor = joblib.load(str(Path(__file__).parent / 'component_extraction_algorithm.joblib'))
+
+    for idx, m in enumerate(matches):
+        # Find which group matched and get its text
+        heading_line = next(g for g in m.groups() if g)
+        start = m.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(full_text)
+        raw_content = full_text[start:end].strip()
+
+        if page_header_pattern:
+            # Remove lines that match the repeating page header pattern
+            ph_re = re.compile(page_header_pattern)
+            filtered_lines = []
+            for line in raw_content.splitlines():
+                if ph_re.search(line.strip()):
+                    continue
+                filtered_lines.append(line)
+            raw_content = "\n".join(filtered_lines)
+
+        cleaned = normalize_text(raw_content)
+
+        # Use atomic extractor to split cleaned content into atomic components
+        atomic_contents = extractor.extract(cleaned)
+        for atomic in atomic_contents:
+            components.append({"heading": heading_line.strip(), "content": atomic})
+
+    return components
+
+def safe_filename(stem: str, suffix: str, timestamp: str) -> str:
+    stem_clean = "".join(c if c in "-_.()[]{}abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" else "_" for c in stem)
+    if len(stem_clean) > MAX_FILENAME_BASE_LEN:
+        h = hashlib.sha1(stem_clean.encode("utf-8")).hexdigest()[:10]
+        stem_clean = f"{stem_clean[:60]}_{h}_{stem_clean[-30:]}"
+    return f"{stem_clean}_{timestamp}{suffix}"
 
 def main():
     clear_screen()
-    print("\n📄 PDF Component Extractor for Android")
+    print("\n📄 PDF Component Extractor")
     print("=" * 50)
-    print("This tool extracts sections from PDFs and saves them as CSV")
-    print("with text normalization for compatibility.")
-    
-    # Start with common Android directories
-    start_dir = "/sdcard"
-    if not Path(start_dir).exists():
-        start_dir = "/storage/emulated/0"
-    if not Path(start_dir).exists():
-        start_dir = os.getcwd()
-    
-    # Select PDF file
-    pdf_path, error = browse_files(start_dir)
-    if error:
-        print(f"\nError: {error}")
+    print("This tool extracts sections from PDFs and saves them as XLSX")
+
+    # --- PDF selection via GUI dialog ---
+    root = tk.Tk()
+    root.withdraw()
+    pdf_file = filedialog.askopenfilename(
+        title="Select PDF file",
+        filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+    )
+    root.destroy()
+
+    if not pdf_file:
+        print("\nNo file selected. Exiting.")
         input("Press Enter to exit...")
         return
-    
+
+    pdf_path = Path(pdf_file)
     print(f"\nSelected PDF: {pdf_path}")
-    
-    # Get output path
-    output_csv = pdf_path.with_suffix('.csv')
-    # --- Add timestamp suffix to output filename ---
+
+    # --- Build output path (same directory as this script) ---
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
-    output_csv = output_csv.with_name(f"{output_csv.stem}_{timestamp}{output_csv.suffix}")
-    # ------------------------------------------------
-    output_path, error = browse_files(output_csv.parent)
-    if error:
-        print(f"\nError: {error}")
-        input("Press Enter to exit...")
-        return
-    
-    # Confirm output filename
-    if output_path.suffix.lower() != '.csv':
-        output_csv = output_path.with_suffix('.csv')
-    else:
-        output_csv = output_path
+    suggested_name = safe_filename(pdf_path.stem, ".xlsx", timestamp)
+    script_dir = Path(__file__).resolve().parent
+    output_xlsx = script_dir / suggested_name
 
-    # --- Ensure timestamp is appended if user changes filename ---
-    if not output_csv.stem.endswith(timestamp):
-        output_csv = output_csv.with_name(f"{output_csv.stem}_{timestamp}{output_csv.suffix}")
-    # ------------------------------------------------------------
+    print(f"\nOutput file will be saved as:\n{output_xlsx}")
 
-    # Get URL
+    # Get source URL (optional)
     url = input("\nEnter source URL (press Enter to skip): ").strip()
-    
+
+    # Get optional page-header pattern for cleaning (generalizable across PDFs)
+    header_pattern = input(
+        "\nIf the PDF has a repeating page header you want removed from descriptions, "
+        "enter a regex pattern that matches that header (or press Enter to skip): "
+    ).strip() or None
+
+    # Prompt for Office of Primary Interest (OPI) for all components
+    opi = input(
+        "\nIf there is an Office of Primary Interest (OPI) for every component in this source, "
+        "enter that OPI here, or press Enter to leave the OPI blank and populate each component manually: "
+    ).strip()
+
     try:
-        # Extract sections by bookmarks from PDF
-        print(f"\nExtracting sections by bookmarks from PDF...")
-        sections = extract_sections_by_bookmarks(pdf_path)
-        
-        # Prepare CSV output
-        source_name = get_pdf_title(pdf_path)
+        print("\nExtracting structured sections from PDF...")
+        # Determine source name from PDF metadata, with a manual override option
+        default_source_name = get_pdf_title(pdf_path)
+        override_source = input(
+            f"\nDetected source title is: '{default_source_name}'.\n"
+            "Press Enter to accept, or type a different Source value to use: "
+        ).strip()
+        source_name = override_source or default_source_name
+
+        sections = extract_components(pdf_path, header_pattern)
         print(f"Found {len(sections)} components")
-        print(f"Saving to: {output_csv}")
-        
-        with open(output_csv, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                "Source Name",
-                "Component Name",
-                "Component Description",
-                "Component URL"
+        print(f"Saving to: {output_xlsx}")
+
+        output_xlsx.parent.mkdir(parents=True, exist_ok=True)
+
+        wb = openpyxl.Workbook()
+        safe_title = "".join(c if c not in r"[]:*?/\'\"" else "_" for c in source_name)[:31]
+        ws = wb.active
+        ws.title = safe_title
+        headers = [
+            "Source",
+            "Component Name",
+            "Component Description",
+            "Component URL",
+            "Component Office of Primary Interest",
+        ]
+        ws.append(headers)
+
+        for section in sections:
+            heading = section["heading"]
+            content = section["content"]
+            component_name = f"{source_name}: {heading}" if heading else source_name
+            ws.append([
+                source_name,
+                component_name,
+                content,
+                url,
+                opi,
             ])
-            writer.writeheader()
-            
-            for section in sections:
-                writer.writerow({
-                    "Source Name": source_name,
-                    "Component Name": section["heading"],
-                    "Component Description": normalize_text(section["content"]),
-                    "Component URL": url
-                })
-        
+
+        try:
+            wb.save(output_xlsx)
+        except FileNotFoundError:
+            print("Path may be too long. Retrying with shortened name...")
+            short_name = safe_filename("output", ".xlsx", timestamp)
+            fallback_path = output_xlsx.parent / short_name
+            wb.save(fallback_path)
+            output_xlsx = fallback_path
+        except OSError as e:
+            print(f"Initial save failed: {e}")
+            short_name = f"out_{timestamp}.xlsx"
+            fallback_path = output_xlsx.parent / short_name
+            wb.save(fallback_path)
+            output_xlsx = fallback_path
+
         print("\n✅ Processing completed successfully!")
-        print(f"Output saved to: {output_csv}")
+        print(f"Output saved to: {output_xlsx}")
         input("\nPress Enter to exit...")
-        
     except Exception as e:
         print(f"\n❌ Error: {str(e)}")
         input("Press Enter to exit...")
         sys.exit(1)
 
 if __name__ == "__main__":
-    # Install PyPDF2 if missing
-    try:
-        import PyPDF2
-    except ImportError:
-        print("Installing required PyPDF2 library...")
-        import subprocess
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "PyPDF2"])
-        import PyPDF2
-        
     main()
