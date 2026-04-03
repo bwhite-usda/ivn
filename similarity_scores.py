@@ -86,6 +86,14 @@ def validate_columns(df, required_columns, sheet_name):
     if missing:
         raise ValueError(f"Missing columns in '{sheet_name}': {missing}")
 
+
+def format_eta(seconds):
+    """Convert seconds to HH:MM:SS string for progress display."""
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
 # --- Paths and loading ---
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -238,12 +246,16 @@ if __name__ == "__main__":
             elapsed = time.time() - start_time
             rate = idx / elapsed if elapsed > 0 else 0
             left = total - idx
-            eta = left / rate if rate > 0 else 0
-            status = f"Processed: {idx}/{total} | Left: {left} | ETA: {int(eta)}s"
+            eta_seconds = left / rate if rate > 0 else 0
+            status = f"Processed: {idx}/{total} | Left: {left} | ETA: {format_eta(eta_seconds)}"
             sys.stdout.write('\r' + ' ' * 80 + '\r')
             sys.stdout.write(status)
             sys.stdout.flush()
     print()
+
+    if not results:
+        print("No qualifying pairs found at the chosen threshold. No output file written.")
+        sys.exit(0)
 
     # Build output DataFrame with strict column order
     output_df = pd.DataFrame(results, columns=output_columns)
