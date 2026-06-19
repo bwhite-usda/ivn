@@ -1,0 +1,107 @@
+=== TOP PRIORITY UPDATE [2026-05-30] ===
+Who: User, Assistant (GitHub Copilot)
+What: User requested a complete current-run crosswalk of every To-Be-Crosswalked.xlsx component_description against every Components.xlsx component_description, using Alignments.xlsx as the required output schema.
+How: Load Alignments.xlsx, Components.xlsx, and To-Be-Crosswalked.xlsx. Run and pass a diagnostic Python inspection before any scoring: print all sheet names, columns for every sheet, and first five rows for every sheet; identify description, ID, and alignment metadata fields. Stop and request guidance if any required workbook, sheet, or field is missing, unreadable, empty, or malformed.
+Where: Workspace folder for ivn_crosswalk-to-be-and-components.
+When: 2026-05-30.
+Why: The user requires proof that the supplied data was queried and understood before similarity generation.
+Verifiability: Compare all 25 To-Be-Crosswalked rows against all 7,339 Components rows, not a sample; exclude self-mapping pairs where similarity is 1.0; start threshold at 0.64 and halve only if no non-self pairs are found; count pairs at each threshold attempt; sort by similarity and export the forty highest-similarity non-self candidate alignments using the exact Alignments.xlsx columns.
+So what: Write top40_alignments.xlsx and top40_alignments.csv for validation and leadership_alignment_report.md with executive-ready narrative, specific matched row citations, and pair-tailored recommendations. Do not show newly discovered alignment rows in chat.
+AI Insights: For this request, the top-forty highest-similarity deliverable supersedes source-diverse/min5 selection, though earlier source-diverse files may remain as separate artifacts.
+=== END TOP PRIORITY UPDATE ===
+
+=== TOP PRIORITY UPDATE [2026-05-20] ===
+Who: User, Assistant (GitHub Copilot)
+What: User requested a complete crosswalk of To-Be-Crosswalked.xlsx component_description rows against Components.xlsx component_description rows, using Alignments.xlsx as the output schema source.
+How: First run a diagnostic Python pass over Alignments.xlsx, Components.xlsx, and To-Be-Crosswalked.xlsx. Print workbook sheet names, every sheet's column names, and every sheet's first 5 rows. Proceed only if all required files/sheets are readable and structurally valid.
+Where: Workspace folder for ivn_crosswalk-to-be-and-components.
+When: 2026-05-20.
+Why: Prevent malformed-file and schema errors before all-row similarity scoring and leadership reporting.
+Verifiability: The diagnostic output must prove that each Excel file was loaded and that component_description, ID, and alignment metadata fields were identified from actual data. If any required file is missing, stop and ask for guidance.
+So what: Similarity scoring must compare every To-Be-Crosswalked row to every Components row, exclude similarity == 1.0 self-maps, start at threshold 0.64, halve the threshold until at least one non-self pair exists, sort by score, export the top 40 in the exact Alignments.xlsx column format, and write an executive-ready report citing specific records and recommendations.
+AI Insights: Do not show newly discovered alignments in chat. Cite specific matched rows only after the diagnostic and scoring have actually queried the supplied files.
+=== END TOP PRIORITY UPDATE ===
+
+=== RETRY PRIORITY UPDATE [2026-05-20] ===
+Who: User, Assistant (GitHub Copilot)
+What: User asked to try again and reiterated that the deliverable must sort and export the forty highest-similarity alignments.
+How: Keep the diagnostic gate and threshold-discovery rule, but if the first threshold with non-zero non-self pairs yields fewer than forty records, sort all non-self scored pairs from the full To-Be-Crosswalked.xlsx by Components.xlsx comparison and export the forty highest-scoring rows.
+Where: Workspace folder for ivn_crosswalk-to-be-and-components.
+When: 2026-05-20.
+Why: The prior run produced only two rows because threshold discovery stopped at 0.64 with two qualifying pairs; the requested deliverable needs forty highest-score candidate alignments.
+Verifiability: Output must contain forty rows, exact Alignments.xlsx columns, all-row comparison counts, and no similarity >= 0.999999 self-maps.
+So what: The leadership report should cite row-level matches and recommendations in the report file while the chat response should not list discovered alignment details.
+AI Insights: Treat the report file as the place for sensitive alignment details; final chat can cite file names and aggregate counts.
+=== END RETRY PRIORITY UPDATE ===
+
+=== CORRECTED EXECUTION UPDATE [2026-05-20] ===
+Who: Assistant (GitHub Copilot)
+What: Reran the diagnostic-gated crosswalk after revising export logic to produce forty highest-scoring non-self pairs from the full all-row comparison.
+How: Re-executed diagnostic pass, then compared all 25 To-Be-Crosswalked rows against all 7,339 Components rows using TF-IDF cosine similarity. Threshold discovery started at 0.64 and found 2 non-self pairs at that threshold. The export then sorted all 183,475 non-self scored pairs and selected the top 40.
+Where: Workspace folder for ivn_crosswalk-to-be-and-components.
+When: 2026-05-20.
+Why: User requested retry because the deliverable must export the forty highest-similarity alignments while still respecting the diagnostic and threshold-discovery rules.
+Verifiability: top40_alignments.xlsx now has 40 rows, 26 columns, exact Alignments.xlsx column order, descending similarity scores, min similarity 0.1027503027729166, max similarity 0.8452406511437112, and no similarity >= 0.999999. leadership_alignment_report.md has 40 matched-record sections, Components.xlsx row citations, and 40 recommendations.
+So what: The corrected outputs supersede the earlier 2-row export.
+AI Insights: Do not expose the matched pair details in chat; direct user to the output/report files.
+=== END CORRECTED EXECUTION UPDATE ===
+
+=== BIAS DIAGNOSIS UPDATE [2026-05-20] ===
+Who: User, Assistant (GitHub Copilot)
+What: User reported that the results do not make sense and appear biased toward EO 14320.
+How: Profiled top40_alignments.xlsx and recomputed TF-IDF cosine scores from Components.xlsx and To-Be-Crosswalked.xlsx.
+Where: Workspace folder for ivn_crosswalk-to-be-and-components.
+When: 2026-05-20.
+Why: Determine why EO 14320 records dominate the highest-scoring output despite other plausible Components.xlsx alignments.
+Verifiability: Top 40 contained 11 EO 14320 rows, but also heavy duplicate pressure: Components.xlsx has 20 EO 14320 rows, including duplicate component_name/component_description records for 4(d), 5(a), 5(b), 5(c), and 5(d). The top 40 also had 21 duplicate keys when deduped by To-Be row plus dependent component description. Global ranking overrepresented a few To-Be rows; To-Be row 9 alone contributed 19 of 40 exported rows.
+So what: The apparent EO 14320 bias is caused by (1) duplicated EO 14320 records in Components.xlsx, (2) very short EO 14320 administrative/legal clauses that match EO 14318 boilerplate nearly verbatim and score high under TF-IDF cosine, and (3) global top-40 sorting without per-To-Be balancing or deduplication. The current method is lexical, not semantic or policy-substantive.
+AI Insights: Next script revision should dedupe candidate records, suppress or separately classify boilerplate/legal administrative clauses, rank per To-Be row, and optionally use source diversity caps or semantic embeddings/reranking before leadership reporting.
+=== END BIAS DIAGNOSIS UPDATE ===
+
+=== EXPANDED EXPORT UPDATE [2026-05-20] ===
+Who: User, Assistant (GitHub Copilot)
+What: User asked whether lowering the threshold or increasing the sort count could produce an alignment report with more sources, including America's AI Action Plan 2025, USDA Budget Explanatory Notes 2025, USDA Directives, OMB A-11, EO 14338, and others.
+How: Updated ivn_crosswalk-to-be-and-components.py to export/report the top 200 non-self scored pairs instead of top 40. Kept the diagnostic gate and threshold discovery at 0.64. Wrote expanded files top200_alignments.xlsx, top200_alignments.csv, and leadership_alignment_report_top200.md.
+Where: Workspace folder for ivn_crosswalk-to-be-and-components.
+When: 2026-05-20.
+Why: Lowering the threshold does not affect the current full-sort export because all non-self pairs are already scored; increasing TOP_N exposes lower-ranked but plausible non-EO 14320 sources.
+Verifiability: top200_alignments.xlsx has 200 rows, 26 columns, exact Alignments.xlsx column order, descending similarity scores, min similarity 0.06064766283575317, max similarity 0.8452406511437112, and no similarity >= 0.999999. Source coverage includes AI Action Plan 15 rows, USDA Budget Explanatory Notes 2025 1 row, USDA Directives 2 rows, OMB A-11/A 11 4 rows, and EO 14338 6 rows.
+So what: Use leadership_alignment_report_top200.md for a broader-source report. The prior top40 files remain available but are more skewed by duplicated boilerplate.
+AI Insights: For a more policy-sensible final report, next revision should combine top-N expansion with deduplication, boilerplate suppression, and per-To-Be/source-balanced ranking.
+=== END EXPANDED EXPORT UPDATE ===
+
+=== SOURCE-DIVERSE EXPORT UPDATE [2026-05-20] ===
+Who: User, Assistant (GitHub Copilot)
+What: User clarified that the problem is not many alignments between a pair of sources, but To-Be-Crosswalked components aligning to only one Components source despite thousands of available components.
+How: Revised ivn_crosswalk-to-be-and-components.py to select the best positive-scoring alignment from at least five distinct Dependent Source values for every To-Be-Crosswalked row. Kept diagnostic gate, all-row scoring, threshold discovery at 0.64, exact Alignments.xlsx schema, and self-map exclusion.
+Where: Workspace folder for ivn_crosswalk-to-be-and-components.
+When: 2026-05-20.
+Why: Ensure each To-Be component is represented against multiple Components.xlsx sources instead of relying on a global top-N sort that can concentrate around one source.
+Verifiability: Generated source_diverse_min5_alignments.xlsx, source_diverse_min5_alignments.csv, and leadership_alignment_report_source_diverse_min5.md. Verification showed 125 rows, 26 columns, exact Alignments.xlsx column order, 25 To-Be rows represented, min/max unique Dependent Source count per To-Be row = 5, zero To-Be rows with fewer than 5 sources, and no similarity >= 0.999999. Requested source coverage includes AI Action Plan 9 rows, USDA Budget Explanatory Notes 2025 1 row, USDA Directives 1 row, OMB A-11/A 11 2 rows, and EO 14338 2 rows.
+So what: Use the source-diverse outputs for review when leadership needs broad source coverage per To-Be requirement.
+AI Insights: This selection strategy directly addresses per-To-Be source diversity; next improvement can combine it with deduplication and boilerplate suppression for quality.
+=== END SOURCE-DIVERSE EXPORT UPDATE ===
+
+=== EXECUTION UPDATE [2026-05-20] ===
+Who: Assistant (GitHub Copilot)
+What: Ran diagnostic and all-row crosswalk using Alignments.xlsx, Components.xlsx, and To-Be-Crosswalked.xlsx after the files became available in the workspace.
+How: Loaded all workbooks with pandas/openpyxl, inspected sheets/columns/head rows, validated required fields, compared all 25 To-Be-Crosswalked component_description values against all 7,339 Components component_description values using TF-IDF cosine similarity, excluded similarity >= 0.999999 self-maps, and used starting threshold 0.64.
+Where: Workspace folder for ivn_crosswalk-to-be-and-components.
+When: 2026-05-20.
+Why: Produce candidate progression alignments in the exact Alignments.xlsx schema and write an executive-ready leadership report.
+Verifiability: Generated excel_diagnostic_report.txt, top40_alignments.xlsx, top40_alignments.csv, and leadership_alignment_report.md. Verification confirmed 26 output columns exactly match Alignments.xlsx and no exported row has similarity >= 0.999999.
+So what: Initial threshold 0.64 produced 2 candidate non-self pairs, so threshold halving was not triggered. The top40 output contains the available 2 qualifying alignments.
+AI Insights: If the user wants exactly 40 rows despite the threshold rule, clarify whether to continue lowering threshold until at least 40 pairs exist.
+=== END EXECUTION UPDATE ===
+
+=== UPDATE [2026-05-18 20:15:00 UTC] ===
+Who: User, Assistant (GitHub Copilot)
+What: User attempted to run ivn_crosswalk-to-be-and-components.py, encountered FileNotFoundError for 'USDA-IVN-dataset.xlsx'
+How: Python script attempted to load a missing Excel file using pandas.read_excel
+Where: Workspace folder for ivn_crosswalk-to-be-and-components
+When: After initial setup, on first script execution
+Why: The script requires 'USDA-IVN-dataset.xlsx' to exist in the working directory, but it was not found
+Verifiability: Error traceback confirms missing file; script cannot proceed without the dataset
+So what: User must provide the required dataset file or update the script to use the correct path
+AI Insights: Prompt user for the correct dataset filepath or instructions to proceed if the file is unavailable
+=== END UPDATE ===

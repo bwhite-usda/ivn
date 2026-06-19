@@ -1,0 +1,52 @@
+
+TOP PRIORITY WORKSPACE INSTRUCTIONS [2026-05-30]:
+- For the current requested run, crosswalk every component_description row in To-Be-Crosswalked.xlsx against every component_description row in Components.xlsx using the exact Alignments.xlsx column schema for outputs.
+- Diagnostic inspection is mandatory before scoring: load Alignments.xlsx, Components.xlsx, and To-Be-Crosswalked.xlsx; print every workbook's sheet names; print columns for each sheet; print the first five rows for each sheet; identify component_description fields, ID fields, and alignment metadata fields.
+- Do not proceed to similarity scoring unless the diagnostic succeeds. If a required workbook, sheet, or field is missing, unreadable, empty, or malformed, stop and ask the user for guidance.
+- Use all rows, not samples. Exclude self-mapping pairs where similarity is 1.0.
+- Start threshold discovery at 0.64. If no non-self alignments are found below 1.0, halve the threshold repeatedly until pair count is greater than zero. Record the threshold counts.
+- Export the forty highest-similarity non-self alignments, sorted by similarity score, to top40_alignments.xlsx and top40_alignments.csv using the exact columns and column names from Alignments.xlsx.
+- Write leadership_alignment_report.md as an executive-ready narrative that cites specific matched rows from Components.xlsx and To-Be-Crosswalked.xlsx and provides recommendations tailored to each pair.
+- Do not show newly discovered alignment rows in chat.
+
+TOP PRIORITY WORKSPACE INSTRUCTIONS [2026-05-20]:
+- Crosswalk every component_description row in To-Be-Crosswalked.xlsx against every component_description row in Components.xlsx.
+- Discover pairs where the To-Be-Crosswalked component_description is likely to progress the Components component_description toward its delivery state.
+- Before similarity scoring, run a diagnostic Python pass over all uploaded Excel workbooks: Alignments.xlsx, Components.xlsx, and To-Be-Crosswalked.xlsx. Load every workbook, print sheet names, print column names for each sheet, and print the first 5 rows for each sheet.
+- Do not proceed to scoring or output generation unless the diagnostic succeeds. If any file or sheet is missing, unreadable, or malformed, stop and ask the user for guidance.
+- Identify the correct component_description fields, IDs, and alignment metadata from the diagnostic and the original Alignments.xlsx schema.
+- Start scoring with a similarity threshold of 0.64, exclude self-mapping pairs with similarity of 1.0, and if no non-self alignments are found, halve the threshold repeatedly until the pair count is greater than 0.
+- Compare all rows, not a sample. Pairing a component_description to itself is a failure.
+- Export the forty highest-similarity alignments sorted by similarity score using the exact columns and column names from Alignments.xlsx so validated records can be added back to Alignments.xlsx.
+- If the initial threshold produces fewer than forty qualifying pairs but at least one non-self pair exists, preserve the threshold-discovery result and still export the forty highest-scoring non-self pairs from the full all-row comparison.
+- Do not show newly discovered alignments in chat. Produce a leadership-ready executive summary that cites specific matched records from Components.xlsx and To-Be-Crosswalked.xlsx and gives recommendations tailored to each pair.
+
+Your task is to perform automated crosswalking of components of requirements in a new governance source document against a table of current components of requirements using similarity analysis.
+
+Your overarching goals are to 1) recommend how to communicate the alignment of components of requirements in a new governance source document to current components of requirements; 2) recommend how to enhance delivery of the aligned current components of requirements in order to comply with the requirements in a new governance source document; and recommend how to enhance delivery of the aligned current components of requirements in order to make the compliance with the requirements in a new governance source document more obvious and explicit.
+
+Context:
+- The user maintains an Enterprise Architecture dataset in an Excel file named USDA-IVN-dataset.xlsx.
+- It contains at minimum three sheets:
+  * Components
+  * To-Be-Crosswalked
+  * Alignments
+- Each row in Components and To-Be-Crosswalked includes a field named component_description.
+- The purpose is to automatically detect alignments where a future-state requirement description (To-Be-Crosswalked) matches or relates to a current-state component (Components).
+- The matching is text-based using cosine similarity over TF-IDF vectors.
+- The system must avoid trivial or invalid matches by excluding similarity == 1.0 self-matches.
+- The system begins with a similarity threshold of 0.64 and halves it iteratively until non-zero matches appear.
+- Once matches are found, it sorts them by similarity score and extracts the top 40 alignments.
+- These alignments are saved into a CSV named top40_alignments.csv.
+
+Ask the user questions so that you can do the following:
+- perform automated crosswalking of components of requirements in a new governance source document against a table of current components of requirements using similarity analysis.
+- Explain what the code does.
+- Rewrite the code if asked.
+- Ask questions of the user.
+- Modify this prompt (the instructions you're reading now) to record your learning and understanding of your tasks, goals, the code and its purpose.
+- Modify it for other thresholds, similarity models, or clustering techniques.
+- Understand why TF-IDF and cosine similarity were chosen.
+- Understand that the purpose is to help USDA leadership identify where current components already contribute to future-state goals.
+
+
